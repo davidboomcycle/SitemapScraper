@@ -460,47 +460,83 @@ class SitemapScraper:
             soup = BeautifulSoup(response.text, 'html.parser')
             nav_urls = set()
             
-            # Look for navigation in common locations
+            # Look for navigation in common locations - COMPREHENSIVE list
             nav_selectors = [
-                'header nav a',           # Navigation in header
-                'nav a',                  # Any nav element
-                '.navigation a',          # Class-based navigation
-                '.nav a',                 # Short nav class
-                '.menu a',               # Menu class
-                '.main-menu a',          # Main menu
-                '.primary-menu a',       # Primary menu
-                '.navbar a',             # Navbar
-                'header .menu a',        # Menu in header
-                'header ul a',           # Lists in header
-                '[role="navigation"] a'   # ARIA navigation role
+                # Standard navigation patterns
+                'header nav a', 'nav a', '.navigation a', '.nav a', '.menu a',
+                '.main-menu a', '.primary-menu a', '.navbar a', 'header .menu a',
+                'header ul a', '[role="navigation"] a',
+                
+                # Modern framework patterns
+                '.nav-menu a', '.navigation-menu a', '.site-navigation a', 
+                '.main-navigation a', '.primary-navigation a', '.top-menu a',
+                '.header-menu a', '.site-menu a', '.global-nav a',
+                
+                # Common CMS patterns (WordPress, Drupal, etc.)
+                '.wp-menu a', '.menu-main a', '.menu-primary a', '.menu-header a',
+                '.region-navigation a', '.block-menu a',
+                
+                # Bootstrap and framework patterns  
+                '.navbar-nav a', '.nav-pills a', '.nav-tabs a', '.nav-link',
+                '.navigation-list a', '.menu-list a',
+                
+                # Generic patterns for any framework
+                'header a', '.header a', '#header a',  # All header links
+                '.top-bar a', '.topbar a', '#topbar a',  # Top bars
+                '.site-header a', '#site-header a',     # Site headers
+                
+                # Container-based patterns
+                '.container nav a', '.wrapper nav a', '.content nav a',
+                
+                # ID-based selectors
+                '#navigation a', '#nav a', '#menu a', '#main-menu a',
+                '#primary-menu a', '#header-menu a', '#site-navigation a',
+                
+                # Fallback: any prominent link in likely navigation areas
+                'header li a', '.header li a', '#header li a'
             ]
             
-            # Extract URLs from each selector
+            # Extract URLs from each selector with debug output
+            selector_results = {}
             for selector in nav_selectors:
                 links = soup.select(selector)
-                for link in links:
-                    href = link.get('href')
-                    if href:
-                        # Convert relative URLs to absolute
-                        full_url = urljoin(homepage_url, href)
-                        
-                        # Only include URLs from the same domain
-                        if urlparse(full_url).netloc == parsed_base.netloc:
-                            # Clean up URL (remove fragments, query params for matching)
-                            clean_url = full_url.split('#')[0].split('?')[0].rstrip('/')
-                            nav_urls.add(clean_url)
+                if links:
+                    selector_results[selector] = len(links)
+                    for link in links:
+                        href = link.get('href')
+                        if href:
+                            # Convert relative URLs to absolute
+                            full_url = urljoin(homepage_url, href)
+                            
+                            # Only include URLs from the same domain
+                            if urlparse(full_url).netloc == parsed_base.netloc:
+                                # Clean up URL (remove fragments, query params for matching)
+                                clean_url = full_url.split('#')[0].split('?')[0].rstrip('/')
+                                nav_urls.add(clean_url)
             
-            # Filter out common non-content URLs
+            # Debug output - show which selectors worked
+            if selector_results:
+                print("Navigation selectors that found links:")
+                for sel, count in sorted(selector_results.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    print(f"  {sel}: {count} links")
+            
+            # Filter out common non-content URLs (less restrictive now)
             filtered_nav_urls = []
             exclude_patterns = [
-                r'/search', r'/login', r'/register', r'/cart', r'/checkout',
-                r'/account', r'/profile', r'/admin', r'mailto:', r'tel:',
-                r'javascript:', r'#', r'\.pdf$', r'\.doc$', r'\.zip$'
+                r'^mailto:', r'^tel:', r'^javascript:', r'^#$', r'^\?',  # Protocol/fragment exclusions
+                r'\.pdf$', r'\.doc$', r'\.zip$', r'\.xls$', r'\.ppt$',  # File downloads
+                r'/wp-admin', r'/admin', r'/login$', r'/signin$',        # Admin areas only
+                r'\.js$', r'\.css$', r'\.xml$', r'\.json$'             # Asset files
             ]
             
+            print(f"Raw navigation URLs found: {len(nav_urls)}")
             for url in nav_urls:
                 if not any(re.search(pattern, url, re.IGNORECASE) for pattern in exclude_patterns):
                     filtered_nav_urls.append(url)
+                else:
+                    # Show what we filtered out for debugging
+                    matched_pattern = next((p for p in exclude_patterns if re.search(p, url, re.IGNORECASE)), None)
+                    print(f"  Filtered out: {url} (matched: {matched_pattern})")
             
             # Remove homepage URL itself from navigation list
             homepage_variations = [homepage_url, homepage_url + '/', homepage_url + '/index', 
