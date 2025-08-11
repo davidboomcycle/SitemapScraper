@@ -548,25 +548,21 @@ class SitemapScraper:
             path = parsed_url.path
             
             # Create a prompt for Claude to analyze the page
-            prompt = f"""Analyze this webpage URL for business importance. Rate from -50 to +50 points.
+            prompt = f"""You must respond with ONLY a single number between -50 and +50. No text, no explanation.
 
 URL: {page.url}
 Domain: {domain}
 Path: {path}
 
-Consider:
-- Is this likely a core business page (about, contact, services, products)?
-- Is this likely junk/test content (test pages, dev URLs, temporary content)?
-- Is this a blog post or article (less important for business pages)?
-- Does the URL structure suggest high business value?
-
-Give ONLY a number between -50 and +50. Examples:
+Rate this URL's business importance (-50 to +50):
 - Homepage: +40
 - About/Contact/Services: +30 to +35
-- Test pages: -40
-- Blog posts: -10 to +5
 - Product/service pages: +20 to +30
-- Login/admin pages: -30"""
+- Blog posts: -10 to +5
+- Test/dev pages: -40
+- Login/admin pages: -30
+
+RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
 
             # Call Claude API
             message = self.claude_client.messages.create(
@@ -578,18 +574,34 @@ Give ONLY a number between -50 and +50. Examples:
             # Parse the response
             response_text = message.content[0].text.strip()
             
-            # Extract number from response
+            # Extract number from response - try multiple approaches
             import re
-            number_match = re.search(r'(-?\d+)', response_text)
-            if number_match:
-                claude_score = float(number_match.group(1))
+            
+            # First, try to parse as a direct number
+            try:
+                claude_score = float(response_text)
                 # Clamp to expected range
                 claude_score = max(-50, min(50, claude_score))
                 self.logger.debug(f"Claude scored {page.url}: {claude_score}")
                 return claude_score
-            else:
-                self.logger.warning(f"Could not parse Claude response: {response_text}")
-                return 0
+            except ValueError:
+                pass
+            
+            # Second, try regex to find number
+            number_match = re.search(r'(-?\d+(?:\.\d+)?)', response_text)
+            if number_match:
+                try:
+                    claude_score = float(number_match.group(1))
+                    # Clamp to expected range
+                    claude_score = max(-50, min(50, claude_score))
+                    self.logger.debug(f"Claude scored {page.url}: {claude_score} (extracted from: {response_text})")
+                    return claude_score
+                except ValueError:
+                    pass
+            
+            # If all parsing fails
+            self.logger.warning(f"Could not parse Claude response: '{response_text}' for {page.url}")
+            return 0
                 
         except Exception as e:
             self.logger.warning(f"Claude API error for {page.url}: {e}")
