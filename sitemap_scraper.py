@@ -68,14 +68,18 @@ class SitemapScraper:
             'Upgrade-Insecure-Requests': '1'
         })
         
-        # Setup logging
+        # Setup logging - quiet console, detailed file
+        file_handler = logging.FileHandler('scraper.log', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.WARNING)  # Only warnings and errors to console
+        console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        
         logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('scraper.log', encoding='utf-8'),
-                logging.StreamHandler()
-            ]
+            level=logging.DEBUG,
+            handlers=[file_handler, console_handler]
         )
         self.logger = logging.getLogger(__name__)
         
@@ -83,15 +87,20 @@ class SitemapScraper:
         if use_claude_api:
             try:
                 import anthropic
+                # Disable anthropic HTTP logging
+                import logging as anthropic_logging
+                anthropic_logging.getLogger("anthropic").setLevel(anthropic_logging.WARNING)
+                anthropic_logging.getLogger("httpx").setLevel(anthropic_logging.WARNING)
+                
                 api_key = os.getenv('ANTHROPIC_API_KEY')
                 if api_key:
                     self.claude_client = anthropic.Anthropic(api_key=api_key)
-                    self.logger.info("Claude API initialized successfully")
+                    print("Claude API enabled for intelligent page analysis")
                 else:
-                    self.logger.warning("ANTHROPIC_API_KEY not found. Set it as environment variable for Claude API features.")
+                    print("ANTHROPIC_API_KEY not found. Set it as environment variable for Claude API features.")
                     self.use_claude_api = False
             except ImportError:
-                self.logger.warning("Anthropic library not installed. Run: pip install anthropic")
+                print("Anthropic library not installed. Run: pip install anthropic")
                 self.use_claude_api = False
         
         # High-priority keywords for critical pages
@@ -263,11 +272,11 @@ class SitemapScraper:
                 has_brotli = False
                 self.logger.warning("Brotli not available, install with: pip install brotli")
             
-            # Debug headers
+            # Debug headers (only log to file, not console)
             content_encoding = response.headers.get('content-encoding', '').lower()
             content_type = response.headers.get('content-type', '').lower()
-            self.logger.info(f"Content-Encoding: '{content_encoding}', Content-Type: '{content_type}'")
-            self.logger.info(f"First few bytes: {response.content[:10]}")
+            self.logger.debug(f"Content-Encoding: '{content_encoding}', Content-Type: '{content_type}'")
+            self.logger.debug(f"First few bytes: {response.content[:10]}")
             
             # Detect compression type
             is_gzip = (content_encoding == 'gzip' or response.content[:2] == b'\x1f\x8b')
@@ -279,27 +288,27 @@ class SitemapScraper:
                 try:
                     content = brotli.decompress(response.content)
                     response_text = content.decode('utf-8')
-                    self.logger.info("Successfully decompressed Brotli content")
+                    self.logger.debug("Successfully decompressed Brotli content")
                 except Exception as e:
-                    self.logger.warning(f"Failed to decompress Brotli: {e}, trying raw content")
+                    self.logger.debug(f"Failed to decompress Brotli: {e}, trying raw content")
                     response_text = response.text
                     content = response.content
             elif is_gzip or (looks_binary and not is_brotli):
                 try:
                     content = gzip.decompress(response.content)
                     response_text = content.decode('utf-8')
-                    self.logger.info("Successfully decompressed gzip content")
+                    self.logger.debug("Successfully decompressed gzip content")
                 except Exception as e:
-                    self.logger.warning(f"Failed to decompress gzip: {e}, trying raw content")
+                    self.logger.debug(f"Failed to decompress gzip: {e}, trying raw content")
                     response_text = response.text
                     content = response.content
             else:
                 response_text = response.text
                 content = response.content
             
-            # Debug: Check what we actually received (safely)
+            # Debug: Check what we actually received (safely) - only log to file
             content_preview = response_text[:200].encode('ascii', errors='replace').decode('ascii')
-            self.logger.info(f"Response content preview: {content_preview}")
+            self.logger.debug(f"Response content preview: {content_preview}")
             
             if not response_text.strip().startswith('<?xml'):
                 self.logger.warning("Response doesn't appear to be XML. Checking if it's HTML...")
@@ -396,7 +405,8 @@ class SitemapScraper:
                 # If both same type, keep the first one
         
         deduplicated_pages = list(unique_pages.values())
-        self.logger.info(f"Removed {len(pages) - len(deduplicated_pages)} duplicate URLs")
+        if len(pages) != len(deduplicated_pages):
+            print(f"Removed {len(pages) - len(deduplicated_pages)} duplicate URLs")
         
         # Separate pages from blog posts using both sitemap source and URL patterns
         regular_pages = []
@@ -408,7 +418,7 @@ class SitemapScraper:
             else:
                 regular_pages.append(page)
         
-        self.logger.info(f"Found {len(regular_pages)} regular pages and {len(blog_posts)} blog posts")
+        print(f"Found {len(regular_pages)} regular pages and {len(blog_posts)} blog posts")
         
         # Score regular pages first
         for page in regular_pages:
@@ -582,7 +592,6 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
                 claude_score = float(response_text)
                 # Clamp to expected range
                 claude_score = max(-50, min(50, claude_score))
-                self.logger.debug(f"Claude scored {page.url}: {claude_score}")
                 return claude_score
             except ValueError:
                 pass
@@ -594,17 +603,18 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
                     claude_score = float(number_match.group(1))
                     # Clamp to expected range
                     claude_score = max(-50, min(50, claude_score))
-                    self.logger.debug(f"Claude scored {page.url}: {claude_score} (extracted from: {response_text})")
                     return claude_score
                 except ValueError:
                     pass
             
             # If all parsing fails
-            self.logger.warning(f"Could not parse Claude response: '{response_text}' for {page.url}")
+            # Only log parsing failures to file, not console
+            self.logger.debug(f"Could not parse Claude response: '{response_text}' for {page.url}")
             return 0
                 
         except Exception as e:
-            self.logger.warning(f"Claude API error for {page.url}: {e}")
+            # Only log API errors to file, not console
+            self.logger.debug(f"Claude API error for {page.url}: {e}")
             return 0
     
     def _is_blog_post(self, page: PageInfo) -> bool:
