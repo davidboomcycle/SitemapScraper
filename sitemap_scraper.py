@@ -37,6 +37,7 @@ class PageInfo:
     depth: int = 0
     has_keywords: bool = False
     is_post: bool = False  # Track if this came from a post sitemap
+    in_navigation: bool = False  # Track if this page is in main navigation
     
     def to_dict(self) -> Dict:
         return {
@@ -47,7 +48,8 @@ class PageInfo:
             'score': self.score,
             'depth': self.depth,
             'has_keywords': self.has_keywords,
-            'is_post': self.is_post
+            'is_post': self.is_post,
+            'in_navigation': self.in_navigation
         }
 
 class SitemapScraper:
@@ -57,6 +59,7 @@ class SitemapScraper:
         self.sitemap_url = sitemap_url
         self.use_claude_api = use_claude_api
         self.claude_client = None
+        self.navigation_urls = []  # Will store high-priority navigation URLs
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -388,6 +391,9 @@ class SitemapScraper:
         """Calculate importance scores - prioritize PAGES over blog posts"""
         self.logger.info("Calculating page importance scores...")
         
+        # Extract navigation URLs from homepage for priority scoring
+        self.navigation_urls = self.extract_navigation_urls(self.sitemap_url)
+        
         # Remove duplicates first (same URL from multiple sitemaps)
         unique_pages = {}
         for page in pages:
@@ -437,6 +443,80 @@ class SitemapScraper:
         
         return all_scored
     
+    def extract_navigation_urls(self, base_url: str) -> List[str]:
+        """Extract navigation menu URLs from the homepage for priority scoring"""
+        try:
+            # Get the base URL without path for homepage
+            from urllib.parse import urlparse, urljoin
+            parsed_base = urlparse(base_url)
+            homepage_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
+            
+            print(f"Analyzing homepage navigation: {homepage_url}")
+            
+            # Fetch homepage
+            response = self.session.get(homepage_url, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            nav_urls = set()
+            
+            # Look for navigation in common locations
+            nav_selectors = [
+                'header nav a',           # Navigation in header
+                'nav a',                  # Any nav element
+                '.navigation a',          # Class-based navigation
+                '.nav a',                 # Short nav class
+                '.menu a',               # Menu class
+                '.main-menu a',          # Main menu
+                '.primary-menu a',       # Primary menu
+                '.navbar a',             # Navbar
+                'header .menu a',        # Menu in header
+                'header ul a',           # Lists in header
+                '[role="navigation"] a'   # ARIA navigation role
+            ]
+            
+            # Extract URLs from each selector
+            for selector in nav_selectors:
+                links = soup.select(selector)
+                for link in links:
+                    href = link.get('href')
+                    if href:
+                        # Convert relative URLs to absolute
+                        full_url = urljoin(homepage_url, href)
+                        
+                        # Only include URLs from the same domain
+                        if urlparse(full_url).netloc == parsed_base.netloc:
+                            # Clean up URL (remove fragments, query params for matching)
+                            clean_url = full_url.split('#')[0].split('?')[0].rstrip('/')
+                            nav_urls.add(clean_url)
+            
+            # Filter out common non-content URLs
+            filtered_nav_urls = []
+            exclude_patterns = [
+                r'/search', r'/login', r'/register', r'/cart', r'/checkout',
+                r'/account', r'/profile', r'/admin', r'mailto:', r'tel:',
+                r'javascript:', r'#', r'\.pdf$', r'\.doc$', r'\.zip$'
+            ]
+            
+            for url in nav_urls:
+                if not any(re.search(pattern, url, re.IGNORECASE) for pattern in exclude_patterns):
+                    filtered_nav_urls.append(url)
+            
+            # Remove homepage URL itself from navigation list
+            homepage_variations = [homepage_url, homepage_url + '/', homepage_url + '/index', 
+                                 homepage_url + '/index.html', homepage_url + '/home']
+            filtered_nav_urls = [url for url in filtered_nav_urls if url not in homepage_variations]
+            
+            print(f"Found {len(filtered_nav_urls)} navigation menu pages")
+            if filtered_nav_urls:
+                print("Navigation pages:", ', '.join([url.replace(homepage_url, '') or '/' for url in filtered_nav_urls[:10]]))
+            
+            return filtered_nav_urls
+            
+        except Exception as e:
+            print(f"Could not extract navigation: {e}")
+            return []
+    
     def _calculate_page_score(self, page: PageInfo) -> float:
         """Calculate score for a single page"""
         score = 0.0
@@ -456,13 +536,20 @@ class SitemapScraper:
         if is_low_priority:
             score -= 30  # Penalty for low-priority pages
             
-        # 3. Homepage detection (highest priority)
+        # 3. Navigation menu priority (HIGHEST PRIORITY - these tell the company story)
+        page_url_clean = page.url.split('#')[0].split('?')[0].rstrip('/')
+        if page_url_clean in self.navigation_urls:
+            score += 200  # Massive bonus for navigation pages
+            page.in_navigation = True
+            page.has_keywords = True
+        
+        # 4. Homepage detection (very high priority)
         if parsed_url.path in ['/', '/index.html', '/index.php', '/home', '/home.html', ''] or \
            path_lower in ['/home', '/index', '/main']:
             score += 100  # Very high homepage bonus
             page.has_keywords = True
         
-        # 4. Critical keyword matching (exact matches get full points) - BOOSTED
+        # 5. Critical keyword matching (exact matches get full points) - BOOSTED
         for keyword, points in self.critical_keywords.items():
             # Check for exact keyword matches in path
             if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower or \
@@ -474,7 +561,7 @@ class SitemapScraper:
                 score += points * 0.8  # Slightly better partial matches
                 page.has_keywords = True
             
-        # 5. Important keyword matching
+        # 6. Important keyword matching
         for keyword, points in self.important_keywords.items():
             if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower:
                 score += points
@@ -483,7 +570,7 @@ class SitemapScraper:
                 score += points * 0.5
                 page.has_keywords = True
             
-        # 6. URL depth score (shorter paths are more important) - ENHANCED
+        # 7. URL depth score (shorter paths are more important) - ENHANCED
         path_parts = [part for part in parsed_url.path.split('/') if part]
         page.depth = len(path_parts)
         if page.depth == 0:  # Root level
@@ -498,16 +585,16 @@ class SitemapScraper:
         elif page.depth > 3:
             score -= (page.depth - 3) * 3  # Increasing penalty for depth
             
-        # 7. Priority score (if available in sitemap)
+        # 8. Priority score (if available in sitemap)
         if page.priority is not None:
             score += page.priority * 15  # Reduced weight compared to our logic
         
-        # 8. Change frequency score
+        # 9. Change frequency score
         if page.changefreq:
             freq_score = self.freq_weights.get(page.changefreq.lower(), 0.5)
             score += freq_score * 8  # Reduced weight
         
-        # 9. Last modification recency (BOOSTED for fresh content)
+        # 10. Last modification recency (BOOSTED for fresh content)
         if page.lastmod:
             try:
                 lastmod_date = datetime.fromisoformat(page.lastmod.replace('Z', '+00:00'))
@@ -643,30 +730,34 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         print(f"\n{'='*separator_width}")
         print(f"TOP {count} MOST IMPORTANT CORE BUSINESS PAGES TO SCRAPE")
         print(f"{'='*separator_width}")
-        print(f"{'Rank':<4} {'Score':<6} {'Type':<5} {'Depth':<5} {'Keywords':<8} {'URL':<135}")
+        print(f"{'Rank':<4} {'Score':<6} {'Type':<5} {'Nav':<4} {'Depth':<5} {'Keywords':<8} {'URL':<120}")
         print(f"{'-'*separator_width}")
         
         for i, page in enumerate(top_pages, 1):
             keywords_mark = "Y" if page.has_keywords else ""  # Changed from ✓ to Y for Windows compatibility
+            nav_mark = "NAV" if page.in_navigation else ""  # Mark navigation pages
             page_type = "Post" if self._is_blog_post(page) else "Page"
             # Show much longer URLs - only truncate if extremely long
-            url_display = page.url[:130] + "..." if len(page.url) > 133 else page.url
-            print(f"{i:<4} {page.score:<6} {page_type:<5} {page.depth:<5} {keywords_mark:<8} {url_display}")
+            url_display = page.url[:115] + "..." if len(page.url) > 118 else page.url
+            print(f"{i:<4} {page.score:<6} {page_type:<5} {nav_mark:<4} {page.depth:<5} {keywords_mark:<8} {url_display}")
         
         print(f"{'-'*separator_width}")
         # Count pages vs posts in selection
         pages_selected = sum(1 for page in top_pages if not self._is_blog_post(page))
         posts_selected = count - pages_selected
+        nav_pages_selected = sum(1 for page in top_pages if page.in_navigation)
         
         claude_status = " + Claude AI" if self.use_claude_api and self.claude_client else ""
-        print(f"Selection logic: PAGES FIRST, prioritizing RECENT updates{claude_status}")
-        print(f"- Selected: {pages_selected} Pages, {posts_selected} Posts")
+        print(f"Selection logic: NAVIGATION FIRST, then PAGES, prioritizing RECENT updates{claude_status}")
+        print(f"- Selected: {pages_selected} Pages ({nav_pages_selected} from main navigation), {posts_selected} Posts")
+        print(f"- Navigation menu pages get HIGHEST priority (200 points) - these tell the company story")
         print(f"- Regular pages (non-blog) are selected first by score")
         print(f"- Recently updated pages get major bonus (up to +30 points)")
         print(f"- Blog posts only included if <{count} regular pages available")
         print(f"- Junk pages filtered out (test/dev/query strings): -1000 penalty")
         if self.use_claude_api and self.claude_client:
             print(f"- Claude AI analysis: Intelligent +/-50 point adjustments")
+        print(f"- Navigation menu pages: 200 points (HIGHEST)")
         print(f"- Homepage bonus: 100 points")
         print(f"- Critical pages (about, contact, services): 38-75 points")
         print(f"- Recency bonus: 30pts(<1wk), 20pts(<1mo), 15pts(<3mo), 10pts(<6mo)")
@@ -770,10 +861,23 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
     
     def get_user_confirmation(self, pages: List[PageInfo]) -> bool:
         """Ask user for confirmation to proceed with scraping"""
-        print(f"\nReady to scrape {len(pages)} pages.")
+        print(f"\n{'='*80}")
+        print(f"SELECTED PAGES TO SCRAPE ({len(pages)} pages)")
+        print(f"{'='*80}")
+        
+        for i, page in enumerate(pages, 1):
+            nav_mark = " [NAV]" if page.in_navigation else ""
+            page_type = " [BLOG]" if self._is_blog_post(page) else ""
+            # Show clean URLs for confirmation
+            from urllib.parse import urlparse
+            parsed = urlparse(page.url)
+            clean_path = parsed.path if parsed.path != '/' else '/'
+            print(f"{i:2d}. {clean_path:<50} (score: {page.score:.1f}){nav_mark}{page_type}")
+        
+        print(f"\n{'='*80}")
         print("This process will:")
         print("- Download and extract readable text content from each page")
-        print("- Extract image titles and alt text")
+        print("- Extract image titles and alt text") 
         print("- Save content as organized text files")
         print("- Respect rate limits (2 second delay between requests)")
         print("- Log all activity to scraper.log")
