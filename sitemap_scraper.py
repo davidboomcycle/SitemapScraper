@@ -113,9 +113,9 @@ class SitemapScraper:
             'main': 40,
             'about': 35,     # About page variants
             'about-us': 35,
-            'contact': 30,   # Contact page variants
-            'contact-us': 30,
-            'reach-us': 25,
+            'contact': 5,    # Contact page variants - minimal bonus (just forms/info)
+            'contact-us': 5,
+            'reach-us': 5,
             'services': 25,  # Main service pages
             'products': 25,  # Main product pages
             'solutions': 25,
@@ -460,7 +460,7 @@ class SitemapScraper:
             soup = BeautifulSoup(response.text, 'html.parser')
             nav_urls = set()
             
-            # Look for navigation in common locations - COMPREHENSIVE list
+            # Look for navigation in common locations - COMPREHENSIVE list including mobile/dropdown
             nav_selectors = [
                 # Standard navigation patterns
                 'header nav a', 'nav a', '.navigation a', '.nav a', '.menu a',
@@ -472,13 +472,26 @@ class SitemapScraper:
                 '.main-navigation a', '.primary-navigation a', '.top-menu a',
                 '.header-menu a', '.site-menu a', '.global-nav a',
                 
+                # Mobile/hamburger menu patterns
+                '.mobile-menu a', '.hamburger-menu a', '.burger-menu a',
+                '.menu-toggle a', '.mobile-nav a', '.off-canvas a',
+                '.drawer-menu a', '.slide-menu a', '.overlay-menu a',
+                
+                # Dropdown and mega menu patterns
+                '.dropdown-menu a', '.mega-menu a', '.submenu a', '.sub-menu a',
+                '.menu-item a', '.menu-link', '.nav-item a', '.nav-dropdown a',
+                
+                # Modern web app patterns
+                '.sidebar-menu a', '.vertical-menu a', '.menu-sidebar a',
+                '.app-menu a', '.dashboard-menu a', '.side-nav a',
+                
                 # Common CMS patterns (WordPress, Drupal, etc.)
                 '.wp-menu a', '.menu-main a', '.menu-primary a', '.menu-header a',
                 '.region-navigation a', '.block-menu a',
                 
                 # Bootstrap and framework patterns  
                 '.navbar-nav a', '.nav-pills a', '.nav-tabs a', '.nav-link',
-                '.navigation-list a', '.menu-list a',
+                '.navigation-list a', '.menu-list a', '.list-nav a',
                 
                 # Generic patterns for any framework
                 'header a', '.header a', '#header a',  # All header links
@@ -487,38 +500,75 @@ class SitemapScraper:
                 
                 # Container-based patterns
                 '.container nav a', '.wrapper nav a', '.content nav a',
+                '.container header a', '.wrapper header a',
                 
                 # ID-based selectors
                 '#navigation a', '#nav a', '#menu a', '#main-menu a',
                 '#primary-menu a', '#header-menu a', '#site-navigation a',
+                '#mobile-menu a', '#hamburger-menu a',
+                
+                # Footer navigation (sometimes contains main nav too)
+                'footer nav a', '.footer-nav a', '.footer-menu a',
                 
                 # Fallback: any prominent link in likely navigation areas
-                'header li a', '.header li a', '#header li a'
+                'header li a', '.header li a', '#header li a',
+                '.menu li a', '.nav li a', '.navigation li a'
             ]
             
             # Extract URLs from each selector with debug output
             selector_results = {}
+            debug_details = []
+            
             for selector in nav_selectors:
                 links = soup.select(selector)
                 if links:
                     selector_results[selector] = len(links)
                     for link in links:
                         href = link.get('href')
+                        link_text = link.get_text(strip=True)
+                        
                         if href:
+                            # Handle encoding issues safely
+                            safe_link_text = link_text.encode('ascii', errors='ignore').decode('ascii')
+                            debug_details.append(f"Found link: '{href}' (text: '{safe_link_text}') via {selector}")
                             # Convert relative URLs to absolute
                             full_url = urljoin(homepage_url, href)
                             
                             # Only include URLs from the same domain
-                            if urlparse(full_url).netloc == parsed_base.netloc:
+                            parsed_full = urlparse(full_url)
+                            if parsed_full.netloc == parsed_base.netloc:
                                 # Clean up URL (remove fragments, query params for matching)
                                 clean_url = full_url.split('#')[0].split('?')[0].rstrip('/')
+                                debug_details.append(f"  -> Adding to nav_urls: {clean_url}")
                                 nav_urls.add(clean_url)
+                            else:
+                                debug_details.append(f"  -> Skipping external link: {full_url}")
+                        else:
+                            safe_link_text = link_text.encode('ascii', errors='ignore').decode('ascii')
+                            debug_details.append(f"Found link without href: (text: '{safe_link_text}') via {selector}")
             
-            # Debug output - show which selectors worked
-            if selector_results:
-                print("Navigation selectors that found links:")
-                for sel, count in sorted(selector_results.items(), key=lambda x: x[1], reverse=True)[:5]:
-                    print(f"  {sel}: {count} links")
+            # ENHANCED: Also search for navigation terms throughout the page
+            expected_nav_terms = ['Platform', 'Customers', 'Partnerships', 'About Us', 'About', 'Services', 'Solutions', 'Products', 'Company']
+            
+            term_nav_urls = set()
+            for term in expected_nav_terms:
+                # Find all links that contain this navigation term in their text
+                for link in soup.find_all('a', href=True):
+                    link_text = link.get_text(strip=True)
+                    if term.lower() in link_text.lower() and len(link_text) < 100:  # Avoid very long text
+                        href = link.get('href')
+                        full_url = urljoin(homepage_url, href)
+                        parsed_full = urlparse(full_url)
+                        
+                        if parsed_full.netloc == parsed_base.netloc:
+                            clean_url = full_url.split('#')[0].split('?')[0].rstrip('/')
+                            term_nav_urls.add(clean_url)
+            
+            # Combine navigation URLs from selectors and terms
+            nav_urls.update(term_nav_urls)
+            
+            if term_nav_urls:
+                print(f"Enhanced navigation search found {len(term_nav_urls)} additional pages")
             
             # Filter out common non-content URLs (less restrictive now)
             filtered_nav_urls = []
@@ -529,14 +579,9 @@ class SitemapScraper:
                 r'\.js$', r'\.css$', r'\.xml$', r'\.json$'             # Asset files
             ]
             
-            print(f"Raw navigation URLs found: {len(nav_urls)}")
             for url in nav_urls:
                 if not any(re.search(pattern, url, re.IGNORECASE) for pattern in exclude_patterns):
                     filtered_nav_urls.append(url)
-                else:
-                    # Show what we filtered out for debugging
-                    matched_pattern = next((p for p in exclude_patterns if re.search(p, url, re.IGNORECASE)), None)
-                    print(f"  Filtered out: {url} (matched: {matched_pattern})")
             
             # Remove homepage URL itself from navigation list
             homepage_variations = [homepage_url, homepage_url + '/', homepage_url + '/index', 
@@ -579,11 +624,12 @@ class SitemapScraper:
             page.in_navigation = True
             page.has_keywords = True
         
-        # 4. Homepage detection (very high priority)
+        # 4. Homepage detection (ABSOLUTE HIGHEST priority - this is the most important page)
         if parsed_url.path in ['/', '/index.html', '/index.php', '/home', '/home.html', ''] or \
            path_lower in ['/home', '/index', '/main']:
-            score += 100  # Very high homepage bonus
+            score += 500  # ABSOLUTE highest priority - homepage is most important
             page.has_keywords = True
+            page.in_navigation = True  # Homepage is always part of navigation
         
         # 5. Critical keyword matching (exact matches get full points) - BOOSTED
         for keyword, points in self.critical_keywords.items():
@@ -793,8 +839,8 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         print(f"- Junk pages filtered out (test/dev/query strings): -1000 penalty")
         if self.use_claude_api and self.claude_client:
             print(f"- Claude AI analysis: Intelligent +/-50 point adjustments")
-        print(f"- Navigation menu pages: 200 points (HIGHEST)")
-        print(f"- Homepage bonus: 100 points")
+        print(f"- Homepage: 500 points (ABSOLUTE HIGHEST - most important page)")
+        print(f"- Navigation menu pages: 200 points")
         print(f"- Critical pages (about, contact, services): 38-75 points")
         print(f"- Recency bonus: 30pts(<1wk), 20pts(<1mo), 15pts(<3mo), 10pts(<6mo)")
         print(f"- URL depth bonus: Root=25, Level1=20, Level2=8 points")
