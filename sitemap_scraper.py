@@ -55,12 +55,15 @@ class PageInfo:
 class SitemapScraper:
     """Main scraper class for analyzing sitemaps and scraping important pages"""
     
-    def __init__(self, sitemap_url: str, use_claude_api: bool = False):
+    def __init__(self, sitemap_url: str, use_claude_api: bool = False, shopify_mode: bool = False, skip_products: bool = True):
         self.sitemap_url = sitemap_url
         self.use_claude_api = use_claude_api
+        self.shopify_mode = shopify_mode
+        self.skip_products = skip_products  # Skip individual product pages in Shopify mode
         self.claude_client = None
         self.navigation_urls = []  # Will store high-priority navigation URLs
         self.homepage_core_terms = []  # Will store core business terms from homepage content
+        self.is_shopify_site = False  # Will be auto-detected
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -120,6 +123,39 @@ class SitemapScraper:
         # Initialize patterns before any methods that use them
         self._initialize_patterns()
         
+        # Auto-detect Shopify site
+        self._detect_shopify_site()
+        
+    def _detect_shopify_site(self):
+        """Auto-detect if this is a Shopify site"""
+        try:
+            # Check common Shopify indicators
+            parsed_url = urlparse(self.sitemap_url)
+            domain = parsed_url.netloc.lower()
+            
+            # Common Shopify domain patterns
+            shopify_indicators = [
+                '.myshopify.com',
+                'shop.',
+                'store.',
+            ]
+            
+            for indicator in shopify_indicators:
+                if indicator in domain:
+                    self.is_shopify_site = True
+                    if not self.shopify_mode:
+                        print("Shopify site detected! Consider using --shopify mode for optimized crawling.")
+                    return
+            
+            # Check if sitemap URL contains Shopify-specific paths
+            if '/sitemap_products_' in self.sitemap_url or '/sitemap_collections_' in self.sitemap_url:
+                self.is_shopify_site = True
+                if not self.shopify_mode:
+                    print("Shopify sitemap structure detected! Consider using --shopify mode.")
+                    
+        except Exception as e:
+            self.logger.debug(f"Error detecting Shopify site: {e}")
+    
     def _initialize_patterns(self):
         """Initialize all URL patterns used for scoring"""
         # BUSINESS-FIRST KEYWORD HIERARCHY
@@ -306,6 +342,55 @@ class SitemapScraper:
             r'/old/',                 # Old directories
         ]
         
+        # Shopify-specific patterns
+        self.shopify_product_patterns = [
+            r'/products/[^/]+$',      # Individual product pages
+            r'/products/[^/]+\?',     # Product pages with query params
+            r'/products/.+/[^/]+$',   # Nested product URLs
+        ]
+        
+        self.shopify_collection_patterns = [
+            r'/collections/[^/]+$',   # Collection pages (categories)
+            r'/collections/all',       # All products collection
+            r'/collections/[^/]+\?',  # Collections with query params
+        ]
+        
+        # Shopify system pages to skip
+        self.shopify_system_patterns = [
+            r'/cart',                  # Shopping cart
+            r'/checkout',              # Checkout pages
+            r'/account',               # Account pages
+            r'/password',              # Password pages
+            r'/challenge',             # Challenge pages
+            r'/tools/',                # Shopify tools
+            r'/admin',                 # Admin pages
+            r'/apps/',                 # App pages
+            r'/cdn/',                  # CDN resources
+            r'/services/',             # Service endpoints
+            r'/payments/',             # Payment pages
+            r'/wallets/',              # Digital wallet pages
+            r'/orders/',               # Order pages
+            r'/discount/',             # Discount pages
+            r'/gift[\-_]cards?/',     # Gift card pages
+        ]
+        
+        # Shopify-specific keywords (for better scoring)
+        self.shopify_keywords = {
+            'collections': 60,         # Collection pages are important
+            'collection': 60,
+            'catalog': 55,
+            'categories': 55,
+            'category': 55,
+            'shop': 50,
+            'store': 50,
+            'products': 30,           # Products landing page (not individual products)
+            'new-arrivals': 45,
+            'best-sellers': 45,
+            'sale': 40,
+            'clearance': 35,
+            'featured': 40,
+        }
+        
         # Frequency scoring weights
         self.freq_weights = {
             'always': 1.0,
@@ -401,6 +486,24 @@ class SitemapScraper:
             "output_cost": output_cost,
             "total_cost": total_cost
         }
+    
+    def _is_shopify_product_page(self, url: str) -> bool:
+        """Check if URL is a Shopify product page"""
+        if not self.shopify_mode:
+            return False
+            
+        return any(re.search(pattern, url, re.IGNORECASE) 
+                  for pattern in self.shopify_product_patterns)
+    
+    def _is_shopify_collection_page(self, url: str) -> bool:
+        """Check if URL is a Shopify collection page"""
+        return any(re.search(pattern, url, re.IGNORECASE) 
+                  for pattern in self.shopify_collection_patterns)
+    
+    def _is_shopify_system_page(self, url: str) -> bool:
+        """Check if URL is a Shopify system page that should be skipped"""
+        return any(re.search(pattern, url, re.IGNORECASE) 
+                  for pattern in self.shopify_system_patterns)
     
     def parse_sitemap(self, sitemap_url: str, is_post_sitemap: bool = False) -> List[PageInfo]:
         """Parse sitemap.xml and extract page information"""
@@ -530,8 +633,25 @@ class SitemapScraper:
                 
                 sub_sitemaps.sort(key=sitemap_priority)
                 
+                # In Shopify mode, show which sitemaps we're processing
+                if self.shopify_mode:
+                    print("\nShopify sitemap structure detected:")
+                    products_count = sum(1 for url in sub_sitemaps if 'product' in url.lower())
+                    collections_count = sum(1 for url in sub_sitemaps if 'collection' in url.lower())
+                    pages_count = sum(1 for url in sub_sitemaps if 'page' in url.lower())
+                    
+                    print(f"  - Product sitemaps: {products_count} {'(WILL BE SKIPPED)' if self.skip_products else ''}")
+                    print(f"  - Collection sitemaps: {collections_count}")
+                    print(f"  - Page sitemaps: {pages_count}")
+                    print()
+                
                 # Parse sitemaps in priority order
                 for i, sub_sitemap_url in enumerate(sub_sitemaps, 1):
+                    # Skip product sitemaps entirely if in Shopify mode with skip_products
+                    if self.shopify_mode and self.skip_products:
+                        if 'sitemap_products_' in sub_sitemap_url.lower() or '/products.' in sub_sitemap_url.lower():
+                            print(f"  Skipping product sitemap {i}/{len(sub_sitemaps)}: {sub_sitemap_url}")
+                            continue
                     is_post = 'post' in sub_sitemap_url.lower()
                     sitemap_type = 'post' if is_post else 'page'
                     print(f"  Processing {sitemap_type} sitemap {i}/{len(sub_sitemaps)}...")
@@ -544,7 +664,18 @@ class SitemapScraper:
             for url in root:
                 loc_elem = url.find('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc')
                 if loc_elem is not None:
-                    page_info = PageInfo(url=loc_elem.text, is_post=is_post_sitemap)
+                    url = loc_elem.text
+                    
+                    # Filter out Shopify product pages if skip_products is enabled
+                    if self.shopify_mode and self.skip_products:
+                        if self._is_shopify_product_page(url):
+                            continue  # Skip individual product pages
+                    
+                    # Always filter out Shopify system pages
+                    if self.shopify_mode and self._is_shopify_system_page(url):
+                        continue
+                    
+                    page_info = PageInfo(url=url, is_post=is_post_sitemap)
                     
                     # Extract additional metadata
                     lastmod_elem = url.find('.//{http://www.sitemaps.org/schemas/sitemap/0.9}lastmod')
@@ -566,7 +697,11 @@ class SitemapScraper:
             
             self.logger.info(f"Found {len(pages)} pages in sitemap")
             if len(pages) > 0:
-                print(f"Extracted {len(pages)} URLs from sitemap")
+                if self.shopify_mode and self.skip_products:
+                    collections_count = sum(1 for p in pages if self._is_shopify_collection_page(p.url))
+                    print(f"Extracted {len(pages)} URLs from sitemap (including {collections_count} collections)")
+                else:
+                    print(f"Extracted {len(pages)} URLs from sitemap")
             return pages
             
         except ET.ParseError as e:
@@ -1217,6 +1352,30 @@ class SitemapScraper:
         url_lower = page.url.lower()
         path_lower = parsed_url.path.lower()
         
+        # Shopify-specific scoring
+        if self.shopify_mode:
+            # Collections get a significant bonus
+            if self._is_shopify_collection_page(page.url):
+                score += 80  # High priority for collection pages
+                page.has_keywords = True
+                
+                # Featured collections get extra bonus
+                featured_collections = ['all', 'best-sellers', 'new-arrivals', 'featured', 'sale']
+                for featured in featured_collections:
+                    if featured in path_lower:
+                        score += 20
+                        break
+            
+            # Individual products get penalty if not skipped already
+            elif self._is_shopify_product_page(page.url):
+                score -= 50  # Lower priority for individual products
+            
+            # Shopify-specific keywords
+            for keyword, points in self.shopify_keywords.items():
+                if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower:
+                    score += points
+                    page.has_keywords = True
+        
         # 1. Check for junk/test pages (heavy penalty)
         is_junk = any(re.search(pattern, page.url, re.IGNORECASE) 
                      for pattern in self.junk_patterns)
@@ -1517,9 +1676,17 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         posts_selected = count - pages_selected
         nav_pages_selected = sum(1 for page in top_pages if page.in_navigation)
         
+        # Count Shopify-specific pages if in Shopify mode
+        if self.shopify_mode:
+            collections_selected = sum(1 for page in top_pages if self._is_shopify_collection_page(page.url))
+            products_selected = sum(1 for page in top_pages if self._is_shopify_product_page(page.url))
+        
         claude_status = " + Claude AI" if self.use_claude_api and self.claude_client else ""
         print(f"Selection logic: BUSINESS-FIRST - What does the company DO/SELL?{claude_status}")
-        print(f"- Selected: {pages_selected} Pages ({nav_pages_selected} from main navigation), {posts_selected} Posts")
+        if self.shopify_mode and hasattr(self, 'shopify_mode'):
+            print(f"- Selected: {collections_selected} Collections, {products_selected} Products, {pages_selected - collections_selected - products_selected} Other Pages")
+        else:
+            print(f"- Selected: {pages_selected} Pages ({nav_pages_selected} from main navigation), {posts_selected} Posts")
         print(f"- TIER 1: CORE BUSINESS (procedures, services, products): 140-200 points")
         print(f"- TIER 2: BUSINESS SUPPORT (about, pricing, contact): 28-54 points") 
         print(f"- TIER 3: ORGANIZATIONAL (staff, locations, careers): 4-24 points")
@@ -1528,6 +1695,9 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         print(f"- Recency bonus: +30pts(<1wk), +20pts(<1mo), +15pts(<3mo)")
         print(f"- Blog posts: -100 penalty (content marketing, not core business)")
         print(f"- Junk pages: -1000 penalty (test/dev/admin pages)")
+        if self.shopify_mode:
+            print(f"- Shopify collections: +80 bonus (category pages)")
+            print(f"- Shopify products: -50 penalty (individual product pages)")
         if self.use_claude_api and self.claude_client:
             print(f"- Claude AI analysis: +/-50 point intelligent adjustments")
         print(f"PRIORITY: Services/Procedures/Products > About/Pricing > Staff/Locations")
@@ -1903,9 +2073,34 @@ def main():
         except ValueError:
             print("Please enter a valid number")
     
+    # Ask about Shopify mode
+    shopify_mode = False
+    skip_products = True
+    
+    # Check if it looks like a Shopify site
+    if 'shop' in website_url.lower() or 'store' in website_url.lower() or '.myshopify.com' in website_url.lower():
+        print("\n⚠️  This appears to be a Shopify store.")
+        shopify_input = input("Enable Shopify mode for optimized crawling? (y/n, default: y): ").strip().lower()
+        if shopify_input != 'n' and shopify_input != 'no':
+            shopify_mode = True
+    else:
+        shopify_input = input("Is this a Shopify store? (y/n, default: n): ").strip().lower()
+        if shopify_input in ['y', 'yes']:
+            shopify_mode = True
+    
+    if shopify_mode:
+        print("\nShopify mode enabled!")
+        print("Shopify stores often have hundreds of product pages.")
+        skip_input = input("Skip individual product pages? (y/n, default: y): ").strip().lower()
+        if skip_input == 'n' or skip_input == 'no':
+            skip_products = False
+            print("Will include individual product pages (this may take longer)")
+        else:
+            print("Will skip individual product pages but INCLUDE collection pages")
+    
     # Ask about Claude API enhancement
     use_claude = False
-    claude_input = input("Use Claude API for smarter page analysis? (y/n, default: n): ").strip().lower()
+    claude_input = input("\nUse Claude API for smarter page analysis? (y/n, default: n): ").strip().lower()
     if claude_input in ['y', 'yes']:
         use_claude = True
         print("Claude API enabled - will provide intelligent page importance analysis")
@@ -1914,7 +2109,7 @@ def main():
     sitemap_url = find_sitemap_url(website_url)
     
     # Initialize scraper
-    scraper = SitemapScraper(sitemap_url, use_claude_api=use_claude)
+    scraper = SitemapScraper(sitemap_url, use_claude_api=use_claude, shopify_mode=shopify_mode, skip_products=skip_products)
     
     try:
         # Parse sitemap
