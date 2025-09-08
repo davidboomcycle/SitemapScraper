@@ -60,10 +60,11 @@ class SitemapScraper:
         self.use_claude_api = use_claude_api
         self.claude_client = None
         self.navigation_urls = []  # Will store high-priority navigation URLs
+        self.homepage_core_terms = []  # Will store core business terms from homepage content
         
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -106,54 +107,138 @@ class SitemapScraper:
                 print("Anthropic library not installed. Run: pip install anthropic")
                 self.use_claude_api = False
         
-        # High-priority keywords for critical pages
-        self.critical_keywords = {
-            'home': 50,      # Homepage indicators
-            'index': 45,
-            'main': 40,
-            'about': 35,     # About page variants
-            'about-us': 35,
-            'contact': 5,    # Contact page variants - minimal bonus (just forms/info)
-            'contact-us': 5,
-            'reach-us': 5,
-            'services': 25,  # Main service pages
-            'products': 25,  # Main product pages
-            'solutions': 25,
+        # Claude API cost tracking
+        self.claude_input_tokens_used = 0
+        self.claude_output_tokens_used = 0
+        
+        # Claude 3.5 Haiku pricing (2025 rates)
+        self.claude_input_cost_per_million = 0.80  # $0.80 per million input tokens
+        self.claude_output_cost_per_million = 4.00  # $4.00 per million output tokens
+        
+        # Removed 403 error tracking - now stops immediately on first error
+        
+        # Initialize patterns before any methods that use them
+        self._initialize_patterns()
+        
+    def _initialize_patterns(self):
+        """Initialize all URL patterns used for scoring"""
+        # BUSINESS-FIRST KEYWORD HIERARCHY
+        # TIER 1: CORE BUSINESS VALUE - What does the business DO/SELL? (HIGHEST PRIORITY)
+        self.core_business_keywords = {
+            # Homepage (most important single page)
+            'home': 100,
+            'index': 95,
+            'main': 90,
+            
+            # Services & Solutions (what they DO)
+            'services': 80,
+            'service': 80,
+            'solutions': 78,
+            'offerings': 75,
+            'what-we-do': 75,
+            
+            # Medical/Healthcare specific (procedures they PERFORM)
+            'procedures': 85,
+            'procedure': 85,
+            'treatments': 85,
+            'treatment': 85,
+            'surgery': 82,
+            'surgeries': 82,
+            'therapy': 80,
+            'therapies': 80,
+            'specialties': 78,
+            'specialty': 78,
+            'conditions': 75,
+            'condition': 75,
+            
+            # Products (what they SELL)
+            'products': 78,
+            'product': 78,
+            'catalog': 75,
+            'shop': 75,
+            'store': 75,
+            'inventory': 70,
+            
+            # Industry-specific service keywords
+            'repair': 75,      # Plumbing, auto, etc.
+            'installation': 75, # HVAC, electrical, etc.
+            'maintenance': 72,
+            'consultation': 70,
+            'assessment': 70,
+            'diagnosis': 70,
         }
         
-        # Medium-priority keywords for important pages
-        self.important_keywords = {
-            'pricing': 20,
-            'plans': 20,
-            'features': 18,
-            'why-us': 18,
-            'team': 15,
-            'careers': 15,
-            'jobs': 15,
-            'support': 15,
-            'help': 15,
-            'faq': 15,
-            'portfolio': 12,
-            'work': 12,
-            'case-studies': 12,
-            'testimonials': 10,
-            'reviews': 10,
-            'news': 10,
-            'blog': 1,  # Severely reduced - main blog pages only
+        # TIER 2: BUSINESS SUPPORT - How they operate (MEDIUM PRIORITY)
+        self.business_support_keywords = {
+            'about': 40,     # About pages are important but secondary
+            'about-us': 40,
+            'contact': 35,   # Contact is support, not core value
+            'contact-us': 35,
+            'reach-us': 35,
+            'pricing': 45,   # Pricing is crucial for business
+            'prices': 45,
+            'cost': 42,
+            'rates': 42,
+            'plans': 40,
+            'packages': 40,
+            'features': 38,
+            'why-us': 35,
+            'why-choose': 35,
+            'faq': 30,
+            'faqs': 30,
+            'support': 28,
+            'help': 28,
+            'testimonials': 25,
+            'reviews': 25,
+            'case-studies': 25,
+            'portfolio': 25,
+            'work': 25,
+            'gallery': 22,
+            'news': 20,
+            'blog': 5,  # Main blog landing only
         }
         
-        # Blog post detection patterns (heavy penalty)
+        # TIER 3: ORGANIZATIONAL INFO - Who/Where they are (LOWER PRIORITY)
+        self.organizational_keywords = {
+            'team': 15,      # Team pages are least important for business value
+            'staff': 15,
+            'doctor': 12,    # Individual staff pages
+            'doctors': 18,   # Staff directory slightly better
+            'physician': 12,
+            'physicians': 18,
+            'employee': 10,
+            'employees': 15,
+            'biography': 8,
+            'bio': 8,
+            'profile': 8,
+            'profiles': 15,
+            'location': 15,  # Location pages are organizational
+            'locations': 20, # Locations directory slightly better
+            'office': 12,
+            'offices': 18,
+            'branch': 12,
+            'branches': 18,
+            'address': 8,
+            'directions': 8,
+            'careers': 10,
+            'jobs': 10,
+            'employment': 10,
+        }
+        
+        # Blog/News/Article detection patterns (heavy penalty)
         self.blog_post_patterns = [
-            r'/blog/.+',              # ANY URL with /blog/ followed by anything
+            r'/blog/.+',              # ANY URL with /blog/ followed by content
             r'/post/.+',              # Any post URLs
             r'/posts/.+',             # Plural posts URLs
             r'/article/.+',           # Any article URLs  
             r'/articles/.+',          # Plural articles URLs
-            r'/news/.+',              # Any news URLs
-            r'/\d{4}/\d{2}/',         # Date-based URLs
+            r'/news/.+',              # Any news URLs - these are content marketing, not services
+            r'/\d{4}/\d{2}/',         # Date-based URLs (2024/01/, etc.)
+            r'/\d{4}-\d{2}-\d{2}',    # Date-based URLs (2024-01-01)
             # Long descriptive URLs (typical of blog posts)
-            r'/[^/]*-[^/]*-[^/]*-[^/]*-[^/]*/',  # URLs with 4+ hyphens (like how-to articles)
-            r'/how-[^/]+/',           # How-to articles
+            r'/[^/]*-[^/]*-[^/]*-[^/]*-[^/]*/',  # URLs with 4+ hyphens
+            r'/how-to-[^/]+/',        # How-to articles
+            r'/how-[^/]+-[^/]+/',     # How articles with multiple words
             r'/why-[^/]+/',           # Why articles  
             r'/what-[^/]+/',          # What articles
             r'/when-[^/]+/',          # When articles
@@ -161,6 +246,8 @@ class SitemapScraper:
             r'/\d+-[^/]+-[^/]+-[^/]+/', # Number-based articles (5-ways-to, 10-tips, etc.)
             r'/guide-[^/]+/',         # Guide articles
             r'/tips-[^/]+/',          # Tips articles
+            r'/benefits-of-[^/]+/',   # Benefits articles
+            r'/ultimate-guide-[^/]+/', # Ultimate guide articles
         ]
         
         # Patterns that usually indicate less important pages (medium penalty)
@@ -176,9 +263,26 @@ class SitemapScraper:
             r'\.pdf$',               # PDF files
             r'/archive',              # Archive pages
             r'/sitemap',              # Sitemap pages
+        ]
+        
+        # Legal/Policy pages (heavy penalty - these are never valuable for business understanding)
+        self.legal_policy_patterns = [
             r'/privacy',              # Privacy policy
+            r'/privacy-policy',       # Privacy policy variants
             r'/terms',                # Terms pages
+            r'/terms-of-service',     # Terms of service
+            r'/terms-and-conditions', # Terms and conditions
             r'/legal',                # Legal pages
+            r'/disclaimer',           # Disclaimers
+            r'/cookies',              # Cookie policy
+            r'/cookie-policy',        # Cookie policy
+            r'/data-protection',      # Data protection
+            r'/gdpr',                 # GDPR compliance
+            r'/accessibility',        # Accessibility statements
+            r'/compliance',           # Compliance pages
+            r'/user-agreement',       # User agreements
+            r'/license',              # License agreements
+            r'/eula',                 # End user license
         ]
         
         # Patterns that indicate test/development/junk pages (heavy penalty)
@@ -213,9 +317,96 @@ class SitemapScraper:
             'never': 0.1
         }
     
+    
+    def estimate_claude_cost(self, page_count: int) -> Dict[str, float]:
+        """Estimate the cost of using Claude API for page analysis"""
+        if not self.use_claude_api or not self.claude_client:
+            return {"input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0, "input_tokens": 0, "output_tokens": 0}
+        
+        # Estimate tokens per API call based on the current prompt
+        # The prompt includes URL, domain, path (~50-150 characters)
+        # Plus the instruction text (~500 characters)
+        estimated_input_tokens_per_call = 200  # Conservative estimate
+        estimated_output_tokens_per_call = 3   # Just a number response
+        
+        total_input_tokens = estimated_input_tokens_per_call * page_count
+        total_output_tokens = estimated_output_tokens_per_call * page_count
+        
+        input_cost = (total_input_tokens / 1_000_000) * self.claude_input_cost_per_million
+        output_cost = (total_output_tokens / 1_000_000) * self.claude_output_cost_per_million
+        total_cost = input_cost + output_cost
+        
+        return {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens, 
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "total_cost": total_cost
+        }
+    
+    def get_claude_cost_confirmation(self, page_count: int) -> bool:
+        """Show Claude API cost estimate and get user confirmation"""
+        if not self.use_claude_api or not self.claude_client:
+            return True
+            
+        cost_estimate = self.estimate_claude_cost(page_count)
+        
+        print(f"\n{'='*80}")
+        print("CLAUDE API COST ESTIMATE")
+        print(f"{'='*80}")
+        print(f"Pages to analyze with Claude AI: {page_count}")
+        print(f"Estimated input tokens: {cost_estimate['input_tokens']:,}")
+        print(f"Estimated output tokens: {cost_estimate['output_tokens']:,}")
+        print(f"")
+        print(f"Estimated costs (Claude 3.5 Haiku):")
+        print(f"  Input tokens:  ${cost_estimate['input_cost']:.4f}")
+        print(f"  Output tokens: ${cost_estimate['output_cost']:.4f}")
+        print(f"  TOTAL COST:    ${cost_estimate['total_cost']:.4f}")
+        
+        if cost_estimate['total_cost'] < 0.01:
+            print(f"\nCost is under $0.01 - very affordable!")
+        elif cost_estimate['total_cost'] < 0.10:
+            print(f"\nCost is under $0.10 - quite affordable.")
+        elif cost_estimate['total_cost'] < 1.00:
+            print(f"\nCost is under $1.00 - moderate cost for enhanced analysis.")
+        else:
+            print(f"\nCost is over $1.00 - consider if enhanced analysis is worth it.")
+            
+        print(f"\nNote: This is an estimate. Actual costs may vary slightly.")
+        print(f"You can disable Claude API at any time by setting use_claude_api=False")
+        
+        while True:
+            response = input(f"\nProceed with Claude API analysis? (y/n): ").strip().lower()
+            if response in ['y', 'yes']:
+                return True
+            elif response in ['n', 'no']:
+                print("Disabling Claude API for this session. Using standard scoring only.")
+                self.use_claude_api = False
+                self.claude_client = None
+                return True
+            else:
+                print("Please enter 'y' or 'n'")
+    
+    def calculate_actual_claude_cost(self) -> Dict[str, float]:
+        """Calculate actual Claude API costs based on tracked usage"""
+        if self.claude_input_tokens_used == 0 and self.claude_output_tokens_used == 0:
+            return {"input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0}
+            
+        input_cost = (self.claude_input_tokens_used / 1_000_000) * self.claude_input_cost_per_million
+        output_cost = (self.claude_output_tokens_used / 1_000_000) * self.claude_output_cost_per_million
+        total_cost = input_cost + output_cost
+        
+        return {
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "total_cost": total_cost
+        }
+    
     def parse_sitemap(self, sitemap_url: str, is_post_sitemap: bool = False) -> List[PageInfo]:
         """Parse sitemap.xml and extract page information"""
         self.logger.info(f"Fetching sitemap from: {sitemap_url}")
+        
+        print(f"Fetching sitemap: {sitemap_url}")
         
         try:
             # First attempt with normal request
@@ -223,39 +414,28 @@ class SitemapScraper:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 403:
-                self.logger.warning(f"403 Forbidden - trying alternative approaches...")
-                
-                # Try different User-Agent strings
-                user_agents = [
-                    'Googlebot/2.1 (+http://www.google.com/bot.html)',
-                    'Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)',
-                    'curl/7.68.0',
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-                ]
-                
-                for ua in user_agents:
-                    try:
-                        self.logger.info(f"Trying with User-Agent: {ua[:50]}...")
-                        headers = self.session.headers.copy()
-                        headers['User-Agent'] = ua
-                        response = self.session.get(sitemap_url, headers=headers, timeout=30)
-                        response.raise_for_status()
-                        self.logger.info("Success with alternative User-Agent!")
-                        break
-                    except requests.RequestException:
-                        continue
-                else:
-                    # If all User-Agents fail, try with delay and minimal headers
-                    try:
-                        self.logger.info("Trying with minimal headers and delay...")
-                        time.sleep(2)  # Add delay
-                        minimal_headers = {'User-Agent': 'curl/7.68.0'}
-                        response = requests.get(sitemap_url, headers=minimal_headers, timeout=30)
-                        response.raise_for_status()
-                        self.logger.info("Success with minimal headers!")
-                    except requests.RequestException:
-                        self.logger.error(f"All bypass attempts failed for: {sitemap_url}")
-                        raise e
+                self.logger.error(f"403 Forbidden error - Website blocking access to: {sitemap_url}")
+                print(f"\n{'='*80}")
+                print("❌ ACCESS DENIED - 403 FORBIDDEN ERROR")
+                print(f"{'='*80}")
+                print(f"The website is blocking automated access to: {sitemap_url}")
+                print(f"")
+                print(f"This indicates the website has active bot protection measures.")
+                print(f"Common reasons for 403 errors:")
+                print(f"• Cloudflare or similar bot protection")
+                print(f"• IP-based rate limiting or blocking")
+                print(f"• Geographic restrictions")
+                print(f"• Website requires authentication")
+                print(f"• Server configured to block automated requests")
+                print(f"")
+                print(f"Solutions to try:")
+                print(f"1. Use a VPN to change your IP address")
+                print(f"2. Wait some time before retrying")
+                print(f"3. Check the website's robots.txt for crawler policies")
+                print(f"4. Try accessing the sitemap manually in a browser first")
+                print(f"5. Contact the website owner for API access")
+                print(f"")
+                raise SystemExit("Script stopped due to 403 Forbidden error. Website is blocking automated access.")
             else:
                 self.logger.error(f"Failed to fetch sitemap: {e}")
                 raise
@@ -336,6 +516,8 @@ class SitemapScraper:
                     if loc_elem is not None:
                         sub_sitemaps.append(loc_elem.text)
                 
+                print(f"Found sitemap index with {len(sub_sitemaps)} sub-sitemaps. Processing...")
+                
                 # Sort sitemaps to prioritize pages over posts
                 def sitemap_priority(url):
                     url_lower = url.lower()
@@ -349,8 +531,10 @@ class SitemapScraper:
                 sub_sitemaps.sort(key=sitemap_priority)
                 
                 # Parse sitemaps in priority order
-                for sub_sitemap_url in sub_sitemaps:
+                for i, sub_sitemap_url in enumerate(sub_sitemaps, 1):
                     is_post = 'post' in sub_sitemap_url.lower()
+                    sitemap_type = 'post' if is_post else 'page'
+                    print(f"  Processing {sitemap_type} sitemap {i}/{len(sub_sitemaps)}...")
                     self.logger.info(f"Parsing {'post' if is_post else 'page'} sitemap: {sub_sitemap_url}")
                     pages.extend(self.parse_sitemap(sub_sitemap_url, is_post))
                 
@@ -381,6 +565,8 @@ class SitemapScraper:
                     pages.append(page_info)
             
             self.logger.info(f"Found {len(pages)} pages in sitemap")
+            if len(pages) > 0:
+                print(f"Extracted {len(pages)} URLs from sitemap")
             return pages
             
         except ET.ParseError as e:
@@ -391,7 +577,10 @@ class SitemapScraper:
         """Calculate importance scores - prioritize PAGES over blog posts"""
         self.logger.info("Calculating page importance scores...")
         
+        print(f"\nAnalyzing {len(pages)} pages for business importance...")
+        
         # Extract navigation URLs from homepage for priority scoring
+        print("Step 1: Analyzing homepage navigation menu...")
         self.navigation_urls = self.extract_navigation_urls(self.sitemap_url)
         
         # Remove duplicates first (same URL from multiple sitemaps)
@@ -414,32 +603,81 @@ class SitemapScraper:
         if len(pages) != len(deduplicated_pages):
             print(f"Removed {len(pages) - len(deduplicated_pages)} duplicate URLs")
         
+        print("Step 2: Categorizing pages (business vs blog content)...")
+        
         # Separate pages from blog posts using both sitemap source and URL patterns
         regular_pages = []
         blog_posts = []
         
         for page in deduplicated_pages:
-            if self._is_blog_post(page):
+            # Navigation pages are NEVER blog posts, regardless of URL patterns
+            if page.in_navigation:
+                regular_pages.append(page)
+            elif self._is_blog_post(page):
                 blog_posts.append(page)
             else:
                 regular_pages.append(page)
         
         print(f"Found {len(regular_pages)} regular pages and {len(blog_posts)} blog posts")
         
-        # Score regular pages first
-        for page in regular_pages:
-            page.score = self._calculate_page_score(page)
+        print("Step 3: Scoring page importance (business-first algorithm)...")
         
-        # Score blog posts (will only be used if we need more than available pages)
-        for page in blog_posts:
-            page.score = self._calculate_page_score(page) - 100  # Still penalty, but not extreme
+        # Score regular pages first (these are most important)
+        if regular_pages:
+            print(f"  Scoring {len(regular_pages)} regular pages...")
+            for i, page in enumerate(regular_pages):
+                if len(regular_pages) > 20 and i % 10 == 0 and i > 0:  # Progress indicator for large sets
+                    print(f"    Progress: {i}/{len(regular_pages)} pages scored...")
+                page.score = self._calculate_page_score(page)
+        
+        # Only score blog posts if we might need them (if user wants more pages than we have regular ones)
+        # This saves a lot of time when there are many blog posts
+        max_needed_blogs = max(0, 50 - len(regular_pages))  # Reasonable limit
+        blogs_to_score = blog_posts[:max_needed_blogs]
+        
+        if blogs_to_score:
+            print(f"  Scoring {len(blogs_to_score)} most recent blog posts (skipping {len(blog_posts) - len(blogs_to_score)} older posts)...")
+            for i, page in enumerate(blogs_to_score):
+                if len(blogs_to_score) > 20 and i % 15 == 0 and i > 0:  # Progress indicator for large sets
+                    print(f"    Progress: {i}/{len(blogs_to_score)} blog posts scored...")
+                page.score = self._calculate_page_score(page) - 100  # Still penalty, but not extreme
+        
+        # Set remaining blog posts to very low scores without detailed calculation
+        for page in blog_posts[max_needed_blogs:]:
+            page.score = -200  # Very low score, won't be selected
+        
+        print("Step 4: Ranking all pages by business importance...")
         
         # Sort regular pages by score
         regular_pages.sort(key=lambda p: p.score, reverse=True)
         blog_posts.sort(key=lambda p: p.score, reverse=True)
         
-        # Combine: pages first, then blog posts if needed
+        # Combine ALL pages and sort by score (this ensures proper ranking regardless of category)
         all_scored = regular_pages + blog_posts
+        all_scored.sort(key=lambda p: p.score, reverse=True)  # Final sort by score
+        
+        # FORCE HOMEPAGE TO #1 POSITION (regardless of scoring)
+        homepage_page = None
+        homepage_index = None
+        
+        # Find the homepage in the list
+        for i, page in enumerate(all_scored):
+            parsed_url = urlparse(page.url)
+            if parsed_url.path in ['/', '/index.html', '/index.php', '/home', '/home.html', ''] or \
+               parsed_url.path.lower() in ['/home', '/index', '/main']:
+                homepage_page = page
+                homepage_index = i
+                break
+        
+        # Move homepage to position #1
+        if homepage_page and homepage_index is not None:
+            all_scored.pop(homepage_index)  # Remove from current position
+            all_scored.insert(0, homepage_page)  # Insert at position 0 (first)
+            print(f"Ensured homepage is ranked #1 (was position #{homepage_index + 1})")
+        else:
+            print("Warning: Could not identify homepage in page list")
+        
+        print(f"Completed analysis! Ranked {len(all_scored)} pages by business importance.")
         
         return all_scored
     
@@ -592,11 +830,385 @@ class SitemapScraper:
             if filtered_nav_urls:
                 print("Navigation pages:", ', '.join([url.replace(homepage_url, '') or '/' for url in filtered_nav_urls[:10]]))
             
+            # ANALYZE HOMEPAGE CONTENT for core business terms
+            print("Analyzing homepage content for core business terms...")
+            self.homepage_core_terms = self._extract_homepage_core_terms(soup, homepage_url)
+            
             return filtered_nav_urls
             
         except Exception as e:
             print(f"Could not extract navigation: {e}")
             return []
+    
+    def _extract_homepage_core_terms(self, soup, homepage_url: str) -> List[str]:
+        """Extract core business terms using semantic NLP analysis with HTML hierarchy weighting"""
+        try:
+            # Use proper NLP analysis weighted by HTML semantic importance
+            import re
+            from collections import Counter
+            
+            # Content extraction with semantic weighting
+            # Title = highest weight (5x), H1 = 4x, H2 = 3x, H3 = 2x, content = 1x
+            weighted_content = []
+            
+            # 1. TITLE (Highest semantic importance - 5x weight)
+            title_element = soup.find('title')
+            if title_element:
+                title_text = title_element.get_text().strip()
+                print(f"  Title: {title_text}")
+                # Extract key phrases and entities from title
+                title_phrases = self._extract_key_phrases_and_entities(title_text)
+                # Add with 5x weight
+                for phrase in title_phrases:
+                    weighted_content.extend([phrase] * 5)
+            
+            # 2. H1 HEADINGS (Very high importance - 4x weight)
+            h1_elements = soup.find_all('h1')
+            h1_texts = []
+            for h1 in h1_elements:
+                h1_text = h1.get_text().strip()
+                if h1_text:
+                    h1_texts.append(h1_text)
+                    h1_phrases = self._extract_key_phrases_and_entities(h1_text)
+                    # Add with 4x weight
+                    for phrase in h1_phrases:
+                        weighted_content.extend([phrase] * 4)
+            
+            if h1_texts:
+                print(f"  H1 headings: {' | '.join(h1_texts)}")
+            
+            # 3. H2 HEADINGS (High importance - 3x weight)
+            h2_elements = soup.find_all('h2')
+            h2_count = 0
+            for h2 in h2_elements[:10]:  # Limit to first 10 H2s
+                h2_text = h2.get_text().strip()
+                if h2_text and len(h2_text) < 200:  # Avoid very long headings
+                    h2_count += 1
+                    h2_phrases = self._extract_key_phrases_and_entities(h2_text)
+                    # Add with 3x weight
+                    for phrase in h2_phrases:
+                        weighted_content.extend([phrase] * 3)
+            
+            if h2_count:
+                print(f"  Analyzed {h2_count} H2 headings")
+            
+            # 4. H3 HEADINGS (Medium importance - 2x weight)
+            h3_elements = soup.find_all('h3')
+            h3_count = 0
+            for h3 in h3_elements[:15]:  # Limit to first 15 H3s
+                h3_text = h3.get_text().strip()
+                if h3_text and len(h3_text) < 150:  # Avoid very long headings
+                    h3_count += 1
+                    h3_phrases = self._extract_key_phrases_and_entities(h3_text)
+                    # Add with 2x weight
+                    for phrase in h3_phrases:
+                        weighted_content.extend([phrase] * 2)
+            
+            if h3_count:
+                print(f"  Analyzed {h3_count} H3 headings")
+            
+            # 5. PROMINENT CONTENT SECTIONS (Medium importance - 2x weight)
+            prominent_selectors = [
+                '.hero', '.banner', '.intro', '.tagline', '.headline', '.lead',
+                '.services-summary', '.about-summary', '.value-prop', '.elevator-pitch',
+                '[class*="hero"]', '[class*="banner"]', '[class*="intro"]'
+            ]
+            
+            prominent_content_found = 0
+            for selector in prominent_selectors:
+                elements = soup.select(selector)
+                for element in elements:
+                    text = element.get_text(strip=True)
+                    if text and 50 < len(text) < 800:  # Meaningful content size
+                        prominent_content_found += 1
+                        prominent_phrases = self._extract_key_phrases_and_entities(text)
+                        # Add with 2x weight
+                        for phrase in prominent_phrases:
+                            weighted_content.extend([phrase] * 2)
+            
+            if prominent_content_found:
+                print(f"  Analyzed {prominent_content_found} prominent content sections")
+            
+            # 6. MAIN CONTENT AREAS (Base importance - 1x weight)
+            main_content_selectors = [
+                'main', '[role="main"]', '.main-content', '#main-content',
+                '.content', '#content', '.page-content', '.entry-content'
+            ]
+            
+            main_content_found = False
+            for selector in main_content_selectors:
+                main_element = soup.select_one(selector)
+                if main_element:
+                    # Extract first few paragraphs from main content
+                    paragraphs = main_element.find_all('p')[:5]  # First 5 paragraphs
+                    for p in paragraphs:
+                        p_text = p.get_text(strip=True)
+                        if 30 < len(p_text) < 500:  # Meaningful paragraph size
+                            main_phrases = self._extract_key_phrases_and_entities(p_text)
+                            # Add with 1x weight (base weight)
+                            weighted_content.extend(main_phrases)
+                    main_content_found = True
+                    break
+            
+            if main_content_found:
+                print(f"  Analyzed main content paragraphs")
+            
+            # ANALYZE WEIGHTED CONTENT using NLP frequency analysis
+            print(f"  Processing {len(weighted_content)} weighted content elements...")
+            
+            # Count frequency of terms (weighted by semantic importance)
+            term_frequency = Counter(weighted_content)
+            
+            # Filter and rank terms by business relevance and frequency
+            business_terms = []
+            
+            # Get most frequent terms (these got the most weight from important HTML elements)
+            most_frequent = term_frequency.most_common(50)
+            
+            for term, frequency in most_frequent:
+                # Filter for business-relevant terms
+                if self._is_business_relevant_term(term) and frequency >= 2:  # Must appear at least twice
+                    business_terms.append((term, frequency))
+            
+            # Sort by frequency (higher = more semantically important based on HTML hierarchy)
+            business_terms.sort(key=lambda x: x[1], reverse=True)
+            
+            # Extract just the terms (remove frequency counts)
+            core_terms = [term for term, freq in business_terms[:20]]  # Top 20 most important
+            
+            if core_terms:
+                print(f"  Core business terms identified: {', '.join(core_terms[:10])}")
+                # Show weighted importance
+                top_weighted = [(term, freq) for term, freq in business_terms[:8]]
+                print(f"  Highest weighted terms: {', '.join([f'{term}({freq})' for term, freq in top_weighted])}")
+            else:
+                print(f"  No core business terms identified through NLP analysis")
+            
+            return core_terms
+            
+        except Exception as e:
+            print(f"  Error in NLP homepage analysis: {e}")
+            # Fallback to simple extraction if NLP fails
+            return self._simple_fallback_extraction(soup)
+    
+    def _extract_key_phrases_and_entities(self, text: str) -> List[str]:
+        """Extract key phrases and business entities using NLP techniques"""
+        import re
+        
+        if not text or len(text.strip()) < 3:
+            return []
+            
+        # Clean and normalize text
+        text = text.strip()
+        
+        # Extract phrases and entities
+        phrases = []
+        
+        # 1. Extract meaningful single words (filtered)
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        for word in words:
+            if self._is_business_relevant_term(word):
+                phrases.append(word)
+        
+        # 2. Extract two-word phrases (bigrams)
+        words_list = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+        for i in range(len(words_list) - 1):
+            bigram = f"{words_list[i]}-{words_list[i+1]}"
+            if len(words_list[i]) >= 3 and len(words_list[i+1]) >= 3:
+                if self._is_business_relevant_term(words_list[i]) or self._is_business_relevant_term(words_list[i+1]):
+                    phrases.append(bigram)
+        
+        # 3. Extract three-word phrases (trigrams) - most valuable for business terms
+        for i in range(len(words_list) - 2):
+            trigram = f"{words_list[i]}-{words_list[i+1]}-{words_list[i+2]}"
+            if all(len(word) >= 3 for word in words_list[i:i+3]):
+                # Check if any word in trigram is business relevant
+                if any(self._is_business_relevant_term(word) for word in words_list[i:i+3]):
+                    phrases.append(trigram)
+        
+        # 4. Extract specific business entity patterns
+        business_patterns = [
+            r'\b(?:seo|search engine optimization)\b',
+            r'\b(?:web|website|web-site)\s+(?:design|development|dev)\b',
+            r'\b(?:digital|online|internet)\s+(?:marketing|advertising|ads)\b',
+            r'\b(?:google|facebook|social media|social)\s+(?:ads|advertising|marketing)\b',
+            r'\b(?:ppc|pay per click|paid advertising)\b',
+            r'\b(?:e-commerce|ecommerce|online store)\b',
+            r'\b(?:content|copywriting|copy writing)\b',
+            r'\b(?:branding|brand|identity)\b',
+            r'\b(?:consulting|consultation|strategy)\b',
+            r'\b(?:services|solutions|offerings)\b'
+        ]
+        
+        for pattern in business_patterns:
+            matches = re.findall(pattern, text.lower())
+            for match in matches:
+                # Normalize the match
+                normalized = re.sub(r'\s+', '-', match.strip())
+                if normalized:
+                    phrases.append(normalized)
+        
+        # Remove duplicates while preserving order
+        unique_phrases = []
+        seen = set()
+        for phrase in phrases:
+            if phrase not in seen and len(phrase) >= 3:
+                unique_phrases.append(phrase)
+                seen.add(phrase)
+        
+        return unique_phrases
+    
+    def _is_business_relevant_term(self, term: str) -> bool:
+        """Check if a term is business-relevant (not a stop word or generic term)"""
+        if not term or len(term) < 3:
+            return False
+            
+        # Common stop words and generic terms to exclude
+        stop_words = {
+            'the', 'and', 'for', 'are', 'was', 'you', 'all', 'any', 'can', 'had',
+            'her', 'him', 'his', 'how', 'man', 'new', 'now', 'old', 'see', 'two',
+            'way', 'who', 'boy', 'did', 'has', 'let', 'put', 'say', 'she', 'too',
+            'use', 'our', 'out', 'day', 'get', 'may', 'own', 'try', 'ask', 'end',
+            'why', 'also', 'back', 'call', 'came', 'each', 'even', 'find', 'give',
+            'good', 'hand', 'here', 'just', 'keep', 'last', 'left', 'life', 'live',
+            'look', 'made', 'make', 'many', 'more', 'most', 'move', 'much', 'must',
+            'name', 'need', 'next', 'only', 'open', 'over', 'part', 'play', 'right',
+            'said', 'same', 'seem', 'show', 'side', 'take', 'tell', 'than', 'that',
+            'them', 'they', 'this', 'time', 'turn', 'very', 'want', 'well', 'went',
+            'were', 'what', 'when', 'will', 'with', 'work', 'year', 'your', 'from',
+            'have', 'been', 'about', 'would', 'there', 'their', 'could', 'other',
+            'after', 'first', 'never', 'these', 'think', 'where', 'being', 'every',
+            'great', 'might', 'shall', 'still', 'those', 'under', 'while', 'should',
+            # Generic business terms that don't indicate specialization
+            'business', 'company', 'service', 'services', 'solution', 'solutions',
+            'professional', 'team', 'quality', 'best', 'top', 'leading', 'expert',
+            'experience', 'years', 'since', 'established', 'founded', 'clients',
+            'customers', 'projects', 'portfolio', 'contact', 'about', 'home',
+            # Generic web terms
+            'website', 'site', 'page', 'pages', 'content', 'information', 'learn',
+            'read', 'click', 'visit', 'browse', 'online', 'internet', 'web'
+        }
+        
+        term_lower = term.lower().strip()
+        
+        if term_lower in stop_words:
+            return False
+            
+        # Business-relevant term patterns
+        business_indicators = [
+            # Core business service terms
+            'seo', 'marketing', 'design', 'development', 'advertising', 'consulting',
+            'strategy', 'optimization', 'analytics', 'automation', 'integration',
+            'management', 'planning', 'research', 'analysis', 'training', 'support',
+            
+            # Industry-specific terms
+            'digital', 'social', 'mobile', 'responsive', 'ecommerce', 'wordpress',
+            'shopify', 'magento', 'drupal', 'joomla', 'custom', 'cms', 'api',
+            'database', 'hosting', 'domain', 'ssl', 'security', 'backup',
+            
+            # Medical/healthcare
+            'medical', 'healthcare', 'dental', 'surgery', 'treatment', 'therapy',
+            'clinic', 'hospital', 'doctor', 'physician', 'nurse', 'patient',
+            'diagnosis', 'procedure', 'rehabilitation', 'wellness', 'health',
+            
+            # Legal
+            'legal', 'law', 'attorney', 'lawyer', 'litigation', 'contract',
+            'compliance', 'regulation', 'patent', 'trademark', 'copyright',
+            
+            # Real estate
+            'real', 'estate', 'property', 'residential', 'commercial', 'rental',
+            'mortgage', 'investment', 'construction', 'renovation', 'architecture',
+            
+            # Financial
+            'financial', 'accounting', 'bookkeeping', 'tax', 'audit', 'investment',
+            'insurance', 'banking', 'loan', 'credit', 'payroll', 'budgeting',
+            
+            # Technical services
+            'repair', 'maintenance', 'installation', 'plumbing', 'electrical',
+            'hvac', 'roofing', 'flooring', 'painting', 'cleaning', 'landscaping'
+        ]
+        
+        # Check if term contains any business indicators
+        for indicator in business_indicators:
+            if indicator in term_lower:
+                return True
+                
+        # Check for multi-word business terms (hyphenated)
+        if '-' in term_lower:
+            parts = term_lower.split('-')
+            if len(parts) >= 2 and any(part in business_indicators for part in parts):
+                return True
+        
+        # If it's a reasonably long term that's not a stop word, include it
+        return len(term_lower) >= 4 and term_lower not in stop_words
+    
+    def _simple_fallback_extraction(self, soup) -> List[str]:
+        """Simple fallback extraction if NLP analysis fails"""
+        try:
+            terms = []
+            
+            # Extract from title
+            title = soup.find('title')
+            if title:
+                words = re.findall(r'\b[a-zA-Z]{4,}\b', title.get_text().lower())
+                terms.extend([w for w in words if self._is_business_relevant_term(w)])
+            
+            # Extract from first H1
+            h1 = soup.find('h1')
+            if h1:
+                words = re.findall(r'\b[a-zA-Z]{4,}\b', h1.get_text().lower())
+                terms.extend([w for w in words if self._is_business_relevant_term(w)])
+            
+            # Remove duplicates
+            return list(dict.fromkeys(terms))
+            
+        except Exception:
+            return []
+
+    def _extract_business_terms_from_text(self, text: str) -> List[str]:
+        """Extract business-relevant terms from text"""
+        import re
+        
+        # Common stop words to filter out
+        stop_words = {
+            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he', 'in', 'is', 'it',
+            'its', 'of', 'on', 'that', 'the', 'to', 'was', 'were', 'will', 'with', 'we', 'our', 'your',
+            'you', 'they', 'them', 'their', 'this', 'these', 'those', 'can', 'have', 'had', 'get', 'all',
+            'any', 'may', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy', 'did', 'has', 'let',
+            'put', 'say', 'she', 'too', 'use', 'her', 'him', 'his', 'how', 'man', 'out', 'get', 'when',
+            'where', 'why', 'what', 'which', 'than', 'more', 'most', 'best', 'top', 'great', 'good',
+            'company', 'business', 'service', 'services'  # Too generic
+        }
+        
+        # Extract potential business terms
+        # Split on common separators and clean
+        terms = re.split(r'[^\w\s-]', text.lower())
+        
+        business_terms = []
+        for term in terms:
+            # Clean whitespace
+            term = term.strip()
+            
+            # Skip stop words, short terms, and very long terms
+            if len(term) < 3 or len(term) > 25 or term in stop_words:
+                continue
+                
+            # Look for multi-word business terms (hyphenated or space-separated)
+            words = re.split(r'[\s-]+', term)
+            
+            # Add individual meaningful words
+            for word in words:
+                word = word.strip()
+                if len(word) >= 3 and word not in stop_words:
+                    business_terms.append(word)
+            
+            # Add the full term if it contains multiple words
+            if len(words) > 1:
+                clean_term = re.sub(r'\s+', '-', term.strip())
+                if clean_term:
+                    business_terms.append(clean_term)
+        
+        return business_terms
     
     def _calculate_page_score(self, page: PageInfo) -> float:
         """Calculate score for a single page"""
@@ -610,6 +1222,16 @@ class SitemapScraper:
                      for pattern in self.junk_patterns)
         if is_junk:
             score -= 1000  # Heavy penalty for junk pages (essentially eliminates them)
+            
+        # 1b. Check for blog posts/news articles (significant penalty)
+        if self._is_blog_post(page):
+            score -= 150  # Significant penalty for blog content (marketing, not core business)
+            
+        # 1c. Check for legal/policy pages (very heavy penalty)
+        is_legal_policy = any(re.search(pattern, page.url, re.IGNORECASE) 
+                            for pattern in self.legal_policy_patterns)
+        if is_legal_policy:
+            score -= 500  # Very heavy penalty - legal pages are never valuable for business understanding
             
         # 2. Check for other low-priority patterns (medium penalty)
         is_low_priority = any(re.search(pattern, page.url, re.IGNORECASE) 
@@ -631,26 +1253,94 @@ class SitemapScraper:
             page.has_keywords = True
             page.in_navigation = True  # Homepage is always part of navigation
         
-        # 5. Critical keyword matching (exact matches get full points) - BOOSTED
-        for keyword, points in self.critical_keywords.items():
-            # Check for exact keyword matches in path
-            if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower or \
-               path_lower == f'/{keyword}' or path_lower.endswith(f'/{keyword}'):
-                score += points * 1.5  # Boost core business pages even more
-                page.has_keywords = True
-            # Partial matches get reduced points
-            elif keyword in path_lower:
-                score += points * 0.8  # Slightly better partial matches
-                page.has_keywords = True
+        # 5. HOMEPAGE-DRIVEN CORE BUSINESS SCORING (Highest Priority)
+        homepage_bonus_applied = False
+        if self.homepage_core_terms:
+            # Filter for truly core business terms (not generic words)
+            core_business_terms = [term for term in self.homepage_core_terms 
+                                 if term not in ['social', 'media', 'content', 'marketing', 'digital', 
+                                               'management', 'strategy', 'strategic', 'guidance']]
             
-        # 6. Important keyword matching
-        for keyword, points in self.important_keywords.items():
-            if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower:
-                score += points
-                page.has_keywords = True
-            elif keyword in path_lower:
-                score += points * 0.5
-                page.has_keywords = True
+            for term in core_business_terms:
+                # More flexible matching for homepage terms
+                term_variants = [term, term.replace('-', ''), term.replace('-', '_')]
+                path_variants = [path_lower, path_lower.replace('-', ''), path_lower.replace('_', '')]
+                
+                # Check various combinations
+                match_found = False
+                for term_var in term_variants:
+                    for path_var in path_variants:
+                        if term_var in path_var:
+                            match_found = True
+                            break
+                    if match_found:
+                        break
+                
+                # Also check for semantic matches (e.g., 'seo' matches 'search-engine-optimization')
+                if not match_found:
+                    if term == 'seo' and ('search' in path_lower or 'engine' in path_lower):
+                        match_found = True
+                    elif term == 'search-engine-optimization' and 'seo' in path_lower:
+                        match_found = True
+                    elif term == 'google-ads' and ('ppc' in path_lower or 'ads' in path_lower):
+                        match_found = True
+                    elif term == 'web-design' and ('design' in path_lower or 'website' in path_lower):
+                        match_found = True
+                
+                if match_found:
+                    # MASSIVE bonus for matching homepage-identified core business terms
+                    # This must be higher than any possible core business keyword combination
+                    score += 600  # Increased to ensure homepage matches always win
+                    page.has_keywords = True
+                    homepage_bonus_applied = True
+                    # Debug: show which term triggered the bonus
+                    self.logger.debug(f"Homepage bonus applied to {page.url}: matched term '{term}'")
+                    break  # Only apply bonus once per page
+        
+        # 6. BUSINESS-FIRST KEYWORD SCORING - Three-tier approach (secondary to homepage terms)
+        keyword_matched = homepage_bonus_applied  # If homepage bonus applied, consider it matched
+        
+        # TIER 1: CORE BUSINESS VALUE (Massive bonuses - what they DO/SELL)
+        # Only apply core business scoring if NO homepage match was found to avoid double-scoring
+        if not homepage_bonus_applied:
+            for keyword, points in self.core_business_keywords.items():
+                if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower or \
+                   path_lower == f'/{keyword}' or path_lower.endswith(f'/{keyword}'):
+                    score += points * 2.0  # DOUBLE bonus for exact core business matches
+                    page.has_keywords = True
+                    keyword_matched = True
+                elif keyword in path_lower:
+                    score += points * 1.5  # Strong bonus for partial core business matches
+                    page.has_keywords = True
+                    keyword_matched = True
+                
+        # TIER 2: BUSINESS SUPPORT (Standard bonuses - how they operate) 
+        # Only apply if no homepage bonus was applied
+        if not homepage_bonus_applied and not keyword_matched:
+            for keyword, points in self.business_support_keywords.items():
+                if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower or \
+                   path_lower == f'/{keyword}' or path_lower.endswith(f'/{keyword}'):
+                    score += points * 1.2  # Modest bonus for exact support matches
+                    page.has_keywords = True
+                    keyword_matched = True
+                elif keyword in path_lower:
+                    score += points * 0.8  # Reduced bonus for partial support matches
+                    page.has_keywords = True
+                    keyword_matched = True
+                    
+        # TIER 3: ORGANIZATIONAL INFO (Minimal bonuses - who/where they are)
+        # Only apply if no homepage bonus and no business keywords matched
+        if not homepage_bonus_applied and not keyword_matched:
+            for keyword, points in self.organizational_keywords.items():
+                if f'/{keyword}' in path_lower or f'{keyword}/' in path_lower or \
+                   path_lower == f'/{keyword}' or path_lower.endswith(f'/{keyword}'):
+                    score += points * 0.8  # Small bonus for exact organizational matches
+                    page.has_keywords = True
+                    keyword_matched = True
+                elif keyword in path_lower:
+                    score += points * 0.5  # Minimal bonus for partial organizational matches
+                    page.has_keywords = True
+                    keyword_matched = True
             
         # 7. URL depth score (shorter paths are more important) - ENHANCED
         path_parts = [part for part in parsed_url.path.split('/') if part]
@@ -711,8 +1401,8 @@ class SitemapScraper:
                 except:
                     pass
         
-        # Apply Claude API intelligence boost if available
-        if self.use_claude_api and self.claude_client:
+        # Apply Claude API intelligence boost if available (only for potentially high-scoring pages)
+        if self.use_claude_api and self.claude_client and score > -50:  # Only call Claude for pages with decent base scores
             claude_boost = self._get_claude_intelligence_score(page)
             score += claude_boost
         
@@ -749,6 +1439,11 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
                 max_tokens=10,
                 messages=[{"role": "user", "content": prompt}]
             )
+            
+            # Track actual token usage
+            if hasattr(message, 'usage'):
+                self.claude_input_tokens_used += message.usage.input_tokens
+                self.claude_output_tokens_used += message.usage.output_tokens
             
             # Parse the response
             response_text = message.content[0].text.strip()
@@ -787,24 +1482,17 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
             return 0
     
     def _is_blog_post(self, page: PageInfo) -> bool:
-        """Check if a page is a blog post"""
-        # Use sitemap source if available, otherwise simple URL patterns
+        """Check if a page is a blog post using comprehensive patterns"""
+        # Use sitemap source if available
         if page.is_post:
             return True
             
-        # Simple fallback patterns for obvious blog posts
-        obvious_post_patterns = [
-            r'/blog/',
-            r'/news/',
-            r'/\d{4}/',  # Year in URL
-            r'/post/',
-            r'/article/',
-        ]
-        
-        return any(pattern in page.url.lower() for pattern in obvious_post_patterns)
+        # Use the comprehensive blog post patterns
+        return any(re.search(pattern, page.url, re.IGNORECASE) 
+                  for pattern in self.blog_post_patterns)
     
-    def display_top_pages(self, pages: List[PageInfo], count: int) -> List[PageInfo]:
-        """Display the top pages and get user confirmation"""
+    def display_top_pages(self, pages: List[PageInfo], count: int) -> Tuple[List[PageInfo], int]:
+        """Display the top pages and get user confirmation for additional pages"""
         top_pages = pages[:count]
         
         # Use wider display format for better URL visibility
@@ -830,22 +1518,88 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         nav_pages_selected = sum(1 for page in top_pages if page.in_navigation)
         
         claude_status = " + Claude AI" if self.use_claude_api and self.claude_client else ""
-        print(f"Selection logic: NAVIGATION FIRST, then PAGES, prioritizing RECENT updates{claude_status}")
+        print(f"Selection logic: BUSINESS-FIRST - What does the company DO/SELL?{claude_status}")
         print(f"- Selected: {pages_selected} Pages ({nav_pages_selected} from main navigation), {posts_selected} Posts")
-        print(f"- Navigation menu pages get HIGHEST priority (200 points) - these tell the company story")
-        print(f"- Regular pages (non-blog) are selected first by score")
-        print(f"- Recently updated pages get major bonus (up to +30 points)")
-        print(f"- Blog posts only included if <{count} regular pages available")
-        print(f"- Junk pages filtered out (test/dev/query strings): -1000 penalty")
+        print(f"- TIER 1: CORE BUSINESS (procedures, services, products): 140-200 points")
+        print(f"- TIER 2: BUSINESS SUPPORT (about, pricing, contact): 28-54 points") 
+        print(f"- TIER 3: ORGANIZATIONAL (staff, locations, careers): 4-24 points")
+        print(f"- Navigation menu pages: +200 bonus (company story)")
+        print(f"- Homepage: +500 points (ABSOLUTE HIGHEST - most important)")
+        print(f"- Recency bonus: +30pts(<1wk), +20pts(<1mo), +15pts(<3mo)")
+        print(f"- Blog posts: -100 penalty (content marketing, not core business)")
+        print(f"- Junk pages: -1000 penalty (test/dev/admin pages)")
         if self.use_claude_api and self.claude_client:
-            print(f"- Claude AI analysis: Intelligent +/-50 point adjustments")
-        print(f"- Homepage: 500 points (ABSOLUTE HIGHEST - most important page)")
-        print(f"- Navigation menu pages: 200 points")
-        print(f"- Critical pages (about, contact, services): 38-75 points")
-        print(f"- Recency bonus: 30pts(<1wk), 20pts(<1mo), 15pts(<3mo), 10pts(<6mo)")
-        print(f"- URL depth bonus: Root=25, Level1=20, Level2=8 points")
+            print(f"- Claude AI analysis: +/-50 point intelligent adjustments")
+        print(f"PRIORITY: Services/Procedures/Products > About/Pricing > Staff/Locations")
         
-        return top_pages
+        # Show next tier of important pages for user consideration
+        additional_pages = self.display_next_tier_pages(pages, count)
+        
+        return top_pages, additional_pages
+    
+    def display_next_tier_pages(self, pages: List[PageInfo], initial_count: int) -> int:
+        """Display next tier of pages and get user decision on additional scraping"""
+        if len(pages) <= initial_count:
+            print(f"\nNo additional pages available beyond the top {initial_count}.")
+            return 0
+            
+        # Show next 25 most important pages (or remaining pages if fewer)
+        next_tier_count = min(25, len(pages) - initial_count)
+        next_tier_pages = pages[initial_count:initial_count + next_tier_count]
+        
+        print(f"\n{'='*180}")
+        print(f"NEXT {next_tier_count} MOST IMPORTANT PAGES (for your consideration)")
+        print(f"{'='*180}")
+        print(f"{'Rank':<4} {'Score':<6} {'Type':<5} {'Nav':<4} {'Depth':<5} {'Keywords':<8} {'URL':<120}")
+        print(f"{'-'*180}")
+        
+        for i, page in enumerate(next_tier_pages, initial_count + 1):
+            keywords_mark = "Y" if page.has_keywords else ""
+            nav_mark = "NAV" if page.in_navigation else ""
+            page_type = "Post" if self._is_blog_post(page) else "Page"
+            url_display = page.url[:115] + "..." if len(page.url) > 118 else page.url
+            print(f"{i:<4} {page.score:<6} {page_type:<5} {nav_mark:<4} {page.depth:<5} {keywords_mark:<8} {url_display}")
+        
+        print(f"{'-'*180}")
+        
+        # Analyze next tier composition
+        next_tier_pages_count = sum(1 for page in next_tier_pages if not self._is_blog_post(page))
+        next_tier_posts_count = next_tier_count - next_tier_pages_count
+        next_tier_nav_count = sum(1 for page in next_tier_pages if page.in_navigation)
+        
+        print(f"Next tier contains: {next_tier_pages_count} Pages ({next_tier_nav_count} navigation), {next_tier_posts_count} Posts")
+        
+        # Get user decision on additional pages
+        max_additional = len(pages) - initial_count
+        print(f"\nYou can scrape up to {max_additional} additional pages from the remaining {max_additional} total.")
+        print(f"The next {next_tier_count} shown above are the most important of the remaining pages.")
+        
+        while True:
+            try:
+                response = input(f"\nHow many ADDITIONAL pages to scrape? (0-{max_additional}, default: {initial_count}): ").strip()
+                if not response:
+                    additional_count = initial_count  # Default to same number as initial request
+                else:
+                    additional_count = int(response)
+                    
+                if additional_count < 0:
+                    print("Please enter a number 0 or greater")
+                    continue
+                elif additional_count > max_additional:
+                    print(f"Maximum additional pages available: {max_additional}")
+                    continue
+                else:
+                    break
+                    
+            except ValueError:
+                print("Please enter a valid number")
+        
+        if additional_count > 0:
+            print(f"\n✓ Will scrape {additional_count} additional pages (total: {initial_count + additional_count} pages)")
+        else:
+            print(f"\n✓ Will scrape only the initial {initial_count} pages (no additional pages)")
+            
+        return additional_count
     
     def extract_text_content(self, html_content: str, url: str) -> str:
         """Extract readable text content and image information from HTML"""
@@ -941,10 +1695,10 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
             self.logger.error(f"Error extracting content from {url}: {e}")
             return f"ERROR: Could not extract content from this page. Raw HTML length: {len(html_content)} characters"
     
-    def get_user_confirmation(self, pages: List[PageInfo]) -> bool:
-        """Ask user for confirmation to proceed with scraping"""
+    def get_user_confirmation(self, pages: List[PageInfo], total_pages: int) -> bool:
+        """Ask user for final confirmation to proceed with scraping"""
         print(f"\n{'='*80}")
-        print(f"SELECTED PAGES TO SCRAPE ({len(pages)} pages)")
+        print(f"FINAL SELECTION: {len(pages)} PAGES TO SCRAPE")
         print(f"{'='*80}")
         
         for i, page in enumerate(pages, 1):
@@ -963,6 +1717,7 @@ RESPOND WITH ONLY THE NUMBER (e.g. 25 or -15)"""
         print("- Save content as organized text files")
         print("- Respect rate limits (2 second delay between requests)")
         print("- Log all activity to scraper.log")
+        print(f"- Process {len(pages)} pages (estimated time: {len(pages) * 2} seconds)")
         
         while True:
             response = input(f"\nProceed with scraping these {len(pages)} pages? (y/n): ").strip().lower()
@@ -1169,20 +1924,46 @@ def main():
             print("No pages found in sitemap")
             return
         
+        # Show Claude API cost estimate if enabled (before doing expensive analysis)
+        if use_claude and not scraper.get_claude_cost_confirmation(len(pages)):
+            # User declined Claude API, but we can continue with standard scoring
+            pass
+        
         # Calculate importance scores
         scored_pages = scraper.calculate_page_importance(pages)
         
-        # Display top pages
-        top_pages = scraper.display_top_pages(scored_pages, num_pages)
+        # Display top pages and get user decision on additional pages
+        top_pages, additional_count = scraper.display_top_pages(scored_pages, num_pages)
         
-        # Get user confirmation
-        if scraper.get_user_confirmation(top_pages):
+        # Combine initial selection with additional pages based on user decision
+        total_pages_to_scrape = top_pages
+        if additional_count > 0:
+            additional_pages = scored_pages[num_pages:num_pages + additional_count]
+            total_pages_to_scrape = top_pages + additional_pages
+        
+        # Get final user confirmation
+        if scraper.get_user_confirmation(total_pages_to_scrape, len(scored_pages)):
             # Scrape pages
-            results = scraper.scrape_pages(top_pages)
+            results = scraper.scrape_pages(total_pages_to_scrape)
             print(f"\nScraping completed! {len(results)} pages processed")
+            print(f"Initial selection: {len(top_pages)} pages")
+            if additional_count > 0:
+                print(f"Additional pages: {additional_count} pages")
+                
+            # Show actual Claude API costs if used
+            if use_claude and scraper.claude_input_tokens_used > 0:
+                actual_costs = scraper.calculate_actual_claude_cost()
+                print(f"\nClaude API Usage Summary:")
+                print(f"  Input tokens used:  {scraper.claude_input_tokens_used:,}")
+                print(f"  Output tokens used: {scraper.claude_output_tokens_used:,}")
+                print(f"  Actual cost: ${actual_costs['total_cost']:.4f}")
         else:
             print("Scraping cancelled by user")
     
+    except SystemExit as e:
+        # Script stopped due to 403 error or user cancellation
+        print(f"\nScript terminated: {e}")
+        exit(1)
     except Exception as e:
         print(f"Error: {e}")
         logging.error(f"Fatal error: {e}")

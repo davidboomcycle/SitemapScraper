@@ -75,8 +75,23 @@ scraped_pages/
 *.log
 junkfile.txt
 
+# IMPORTANT: Never commit service account keys or credentials
+*.json
+*.key
+*.pem
+*.p12
+*.pfx
+
 # API keys and secrets
 .env.local
 .env.production
 config.py
 secrets.py
+credentials/
+secrets/
+
+# Google Cloud credentials
+*-service-account.json
+*-credentials.json
+gcp-key.json
+google-credentials.json
