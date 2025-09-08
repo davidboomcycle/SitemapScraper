@@ -126,35 +126,108 @@ class SitemapScraper:
         # Auto-detect Shopify site
         self._detect_shopify_site()
         
-    def _detect_shopify_site(self):
-        """Auto-detect if this is a Shopify site"""
+    def detect_site_type(self) -> dict:
+        """Detect the type of website and its characteristics"""
+        site_info = {
+            'type': 'standard',
+            'platform': None,
+            'indicators': [],
+            'has_products': False,
+            'has_collections': False,
+            'estimated_product_pages': 0,
+            'confidence': 'low'
+        }
+        
         try:
-            # Check common Shopify indicators
+            # Parse domain and sitemap URL
             parsed_url = urlparse(self.sitemap_url)
             domain = parsed_url.netloc.lower()
+            sitemap_path = self.sitemap_url.lower()
             
-            # Common Shopify domain patterns
-            shopify_indicators = [
-                '.myshopify.com',
-                'shop.',
-                'store.',
-            ]
+            # Check for Shopify indicators
+            shopify_score = 0
             
-            for indicator in shopify_indicators:
-                if indicator in domain:
-                    self.is_shopify_site = True
-                    if not self.shopify_mode:
-                        print("Shopify site detected! Consider using --shopify mode for optimized crawling.")
-                    return
+            # Strong Shopify indicators
+            if '.myshopify.com' in domain:
+                site_info['indicators'].append('Shopify domain (.myshopify.com)')
+                shopify_score += 100
             
-            # Check if sitemap URL contains Shopify-specific paths
-            if '/sitemap_products_' in self.sitemap_url or '/sitemap_collections_' in self.sitemap_url:
-                self.is_shopify_site = True
-                if not self.shopify_mode:
-                    print("Shopify sitemap structure detected! Consider using --shopify mode.")
+            if '/sitemap_products_' in sitemap_path:
+                site_info['indicators'].append('Shopify product sitemap structure')
+                site_info['has_products'] = True
+                shopify_score += 80
+                
+            if '/sitemap_collections_' in sitemap_path:
+                site_info['indicators'].append('Shopify collections sitemap structure')
+                site_info['has_collections'] = True
+                shopify_score += 80
+            
+            # Medium Shopify indicators
+            if 'shop.' in domain or 'store.' in domain:
+                site_info['indicators'].append('E-commerce subdomain (shop/store)')
+                shopify_score += 30
+            
+            # Try to fetch robots.txt for more clues
+            try:
+                robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
+                response = self.session.get(robots_url, timeout=5)
+                if response.status_code == 200:
+                    robots_content = response.text.lower()
                     
+                    # Check for platform-specific patterns in robots.txt
+                    if 'shopify' in robots_content:
+                        site_info['indicators'].append('Shopify mentioned in robots.txt')
+                        shopify_score += 50
+                    
+                    # Count product sitemaps
+                    product_sitemap_count = robots_content.count('sitemap_products_')
+                    if product_sitemap_count > 0:
+                        site_info['estimated_product_pages'] = product_sitemap_count * 500  # Rough estimate
+                        site_info['indicators'].append(f'Found {product_sitemap_count} product sitemaps')
+                        
+            except:
+                pass  # robots.txt fetch failed, not critical
+            
+            # Check for WooCommerce indicators
+            woo_score = 0
+            if '/product-sitemap' in sitemap_path or '/product_cat-sitemap' in sitemap_path:
+                site_info['indicators'].append('WooCommerce sitemap structure')
+                woo_score += 80
+            
+            # Check for BigCommerce indicators
+            bigcommerce_score = 0
+            if '.mybigcommerce.com' in domain:
+                site_info['indicators'].append('BigCommerce domain')
+                bigcommerce_score += 100
+            
+            # Determine platform and confidence
+            if shopify_score >= 80:
+                site_info['type'] = 'ecommerce'
+                site_info['platform'] = 'Shopify'
+                site_info['confidence'] = 'high' if shopify_score >= 100 else 'medium'
+                self.is_shopify_site = True
+            elif woo_score >= 80:
+                site_info['type'] = 'ecommerce'
+                site_info['platform'] = 'WooCommerce'
+                site_info['confidence'] = 'medium'
+            elif bigcommerce_score >= 80:
+                site_info['type'] = 'ecommerce'
+                site_info['platform'] = 'BigCommerce'
+                site_info['confidence'] = 'high'
+            elif shopify_score >= 30 or 'shop' in domain or 'store' in domain:
+                site_info['type'] = 'ecommerce'
+                site_info['platform'] = 'Unknown'
+                site_info['confidence'] = 'low'
+                
         except Exception as e:
-            self.logger.debug(f"Error detecting Shopify site: {e}")
+            self.logger.debug(f"Error detecting site type: {e}")
+            
+        return site_info
+    
+    def _detect_shopify_site(self):
+        """Legacy method for backward compatibility"""
+        site_info = self.detect_site_type()
+        self.is_shopify_site = (site_info['platform'] == 'Shopify')
     
     def _initialize_patterns(self):
         """Initialize all URL patterns used for scoring"""
@@ -2058,10 +2131,100 @@ def main():
         print("Error: Website URL is required")
         return
     
+    # Find sitemap URL first for detection
+    sitemap_url = find_sitemap_url(website_url)
+    
+    # Create temporary scraper instance for site detection
+    temp_scraper = SitemapScraper(sitemap_url, use_claude_api=False, shopify_mode=False)
+    
+    # Detect site type
+    print("\n" + "="*60)
+    print("SITE TYPE DETECTION")
+    print("="*60)
+    
+    site_info = temp_scraper.detect_site_type()
+    
+    print(f"\n📊 Detection Results:")
+    print(f"  Site Type: {site_info['type'].upper()}")
+    print(f"  Platform: {site_info['platform'] or 'Not detected'}")
+    print(f"  Confidence: {site_info['confidence'].upper()}")
+    
+    if site_info['indicators']:
+        print(f"\n🔍 Indicators found:")
+        for indicator in site_info['indicators']:
+            print(f"  • {indicator}")
+    
+    if site_info['estimated_product_pages'] > 0:
+        print(f"\n⚠️  Estimated product pages: {site_info['estimated_product_pages']:,}+")
+        print(f"  (Crawling all products could take {site_info['estimated_product_pages'] * 2 // 60} minutes)")
+    
+    # Ask user to confirm or correct the detection
+    print("\n" + "="*60)
+    
+    shopify_mode = False
+    skip_products = True
+    
+    if site_info['type'] == 'ecommerce':
+        if site_info['platform'] == 'Shopify':
+            print(f"✅ Detected as SHOPIFY store (confidence: {site_info['confidence']})")
+            confirm = input("Is this correct? (y/n, default: y): ").strip().lower()
+            if confirm != 'n' and confirm != 'no':
+                shopify_mode = True
+            else:
+                # Ask what it actually is
+                print("\nWhat type of site is this?")
+                print("1. Shopify store")
+                print("2. WooCommerce store")
+                print("3. Other e-commerce platform")
+                print("4. Standard website (not e-commerce)")
+                choice = input("Enter choice (1-4): ").strip()
+                if choice == '1':
+                    shopify_mode = True
+                elif choice in ['2', '3']:
+                    # Still use shopify mode for other e-commerce
+                    print("Will use e-commerce optimization mode.")
+                    shopify_mode = True
+        else:
+            print(f"⚠️  Detected as E-COMMERCE site (platform: {site_info['platform'] or 'unknown'})")
+            print("This site may have many product pages that could slow down crawling.")
+            
+            use_ecommerce = input("Enable e-commerce mode to skip individual products? (y/n, default: y): ").strip().lower()
+            if use_ecommerce != 'n' and use_ecommerce != 'no':
+                shopify_mode = True  # Use shopify mode for all e-commerce sites
+    else:
+        # Not detected as e-commerce
+        print("📄 Detected as STANDARD website (not e-commerce)")
+        confirm = input("Is this correct? (y/n, default: y): ").strip().lower()
+        if confirm == 'n' or confirm == 'no':
+            is_ecommerce = input("Is this actually an e-commerce site? (y/n): ").strip().lower()
+            if is_ecommerce in ['y', 'yes']:
+                print("\n⚠️  E-commerce sites often have hundreds/thousands of product pages.")
+                print("This can make crawling extremely slow.")
+                shopify_mode = True
+    
+    # If e-commerce mode is enabled, ask about skipping products
+    if shopify_mode:
+        print("\n" + "="*60)
+        print("E-COMMERCE MODE ENABLED")
+        print("="*60)
+        print("\nE-commerce sites typically have:")
+        print("  • Few collection/category pages (10-50) - HIGH VALUE")
+        print("  • Many individual product pages (100-10,000+) - LOW VALUE for overview")
+        print("\nRecommendation: Skip individual products, keep collections")
+        
+        skip_input = input("\nSkip individual product pages? (y/n, default: y): ").strip().lower()
+        if skip_input == 'n' or skip_input == 'no':
+            skip_products = False
+            print("⚠️  Will include individual product pages (this may take MUCH longer)")
+        else:
+            print("✅ Will skip individual product pages but INCLUDE collection/category pages")
+    
+    print("\n" + "="*60)
+    
     # Get number of pages to scrape
     while True:
         try:
-            num_pages = input("How many pages to scrape? (default: 10): ").strip()
+            num_pages = input("\nHow many pages to scrape? (default: 10): ").strip()
             if not num_pages:
                 num_pages = 10
             else:
@@ -2073,31 +2236,6 @@ def main():
         except ValueError:
             print("Please enter a valid number")
     
-    # Ask about Shopify mode
-    shopify_mode = False
-    skip_products = True
-    
-    # Check if it looks like a Shopify site
-    if 'shop' in website_url.lower() or 'store' in website_url.lower() or '.myshopify.com' in website_url.lower():
-        print("\n⚠️  This appears to be a Shopify store.")
-        shopify_input = input("Enable Shopify mode for optimized crawling? (y/n, default: y): ").strip().lower()
-        if shopify_input != 'n' and shopify_input != 'no':
-            shopify_mode = True
-    else:
-        shopify_input = input("Is this a Shopify store? (y/n, default: n): ").strip().lower()
-        if shopify_input in ['y', 'yes']:
-            shopify_mode = True
-    
-    if shopify_mode:
-        print("\nShopify mode enabled!")
-        print("Shopify stores often have hundreds of product pages.")
-        skip_input = input("Skip individual product pages? (y/n, default: y): ").strip().lower()
-        if skip_input == 'n' or skip_input == 'no':
-            skip_products = False
-            print("Will include individual product pages (this may take longer)")
-        else:
-            print("Will skip individual product pages but INCLUDE collection pages")
-    
     # Ask about Claude API enhancement
     use_claude = False
     claude_input = input("\nUse Claude API for smarter page analysis? (y/n, default: n): ").strip().lower()
@@ -2105,10 +2243,7 @@ def main():
         use_claude = True
         print("Claude API enabled - will provide intelligent page importance analysis")
     
-    # Find sitemap URL
-    sitemap_url = find_sitemap_url(website_url)
-    
-    # Initialize scraper
+    # Initialize the actual scraper with user-confirmed settings
     scraper = SitemapScraper(sitemap_url, use_claude_api=use_claude, shopify_mode=shopify_mode, skip_products=skip_products)
     
     try:
