@@ -2160,47 +2160,93 @@ def main():
     
     # Ask user to confirm or correct the detection
     print("\n" + "="*60)
+    print("SITE TYPE CONFIRMATION")
+    print("="*60)
     
-    shopify_mode = False
-    skip_products = True
-    
+    # Show what was detected with visual indicator
     if site_info['type'] == 'ecommerce':
         if site_info['platform'] == 'Shopify':
-            print(f"✅ Detected as SHOPIFY store (confidence: {site_info['confidence']})")
-            confirm = input("Is this correct? (y/n, default: y): ").strip().lower()
-            if confirm != 'n' and confirm != 'no':
-                shopify_mode = True
-            else:
-                # Ask what it actually is
-                print("\nWhat type of site is this?")
-                print("1. Shopify store")
-                print("2. WooCommerce store")
-                print("3. Other e-commerce platform")
-                print("4. Standard website (not e-commerce)")
-                choice = input("Enter choice (1-4): ").strip()
-                if choice == '1':
-                    shopify_mode = True
-                elif choice in ['2', '3']:
-                    # Still use shopify mode for other e-commerce
-                    print("Will use e-commerce optimization mode.")
-                    shopify_mode = True
+            print(f"\n🛒 AUTO-DETECTED: Shopify Store (confidence: {site_info['confidence']})")
+        elif site_info['platform'] == 'WooCommerce':
+            print(f"\n🛒 AUTO-DETECTED: WooCommerce Store (confidence: {site_info['confidence']})")
+        elif site_info['platform'] == 'BigCommerce':
+            print(f"\n🛒 AUTO-DETECTED: BigCommerce Store (confidence: {site_info['confidence']})")
         else:
-            print(f"⚠️  Detected as E-COMMERCE site (platform: {site_info['platform'] or 'unknown'})")
-            print("This site may have many product pages that could slow down crawling.")
-            
-            use_ecommerce = input("Enable e-commerce mode to skip individual products? (y/n, default: y): ").strip().lower()
-            if use_ecommerce != 'n' and use_ecommerce != 'no':
-                shopify_mode = True  # Use shopify mode for all e-commerce sites
+            print(f"\n🛒 AUTO-DETECTED: E-commerce Site (platform unknown)")
     else:
-        # Not detected as e-commerce
-        print("📄 Detected as STANDARD website (not e-commerce)")
-        confirm = input("Is this correct? (y/n, default: y): ").strip().lower()
-        if confirm == 'n' or confirm == 'no':
-            is_ecommerce = input("Is this actually an e-commerce site? (y/n): ").strip().lower()
-            if is_ecommerce in ['y', 'yes']:
-                print("\n⚠️  E-commerce sites often have hundreds/thousands of product pages.")
-                print("This can make crawling extremely slow.")
-                shopify_mode = True
+        print(f"\n📄 AUTO-DETECTED: Standard Website (not e-commerce)")
+    
+    # ALWAYS show the menu for user to confirm or correct
+    print("\nPlease confirm or select the correct site type:")
+    print("\n  E-COMMERCE PLATFORMS:")
+    print("  1. Shopify store")
+    print("  2. WooCommerce store (WordPress)")
+    print("  3. BigCommerce store")
+    print("  4. Magento store")
+    print("  5. Other e-commerce platform")
+    print("\n  STANDARD SITES:")
+    print("  6. Standard website (blog, corporate, informational)")
+    print("  7. WordPress site (non-commerce)")
+    print("  8. Custom CMS or static site")
+    
+    # Set default based on detection
+    if site_info['type'] == 'ecommerce':
+        if site_info['platform'] == 'Shopify':
+            default_choice = '1'
+        elif site_info['platform'] == 'WooCommerce':
+            default_choice = '2'
+        elif site_info['platform'] == 'BigCommerce':
+            default_choice = '3'
+        else:
+            default_choice = '5'
+    else:
+        default_choice = '6'
+    
+    # Get user input with default
+    while True:
+        choice = input(f"\nEnter choice (1-8, default: {default_choice}): ").strip()
+        if not choice:
+            choice = default_choice
+        
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
+            break
+        else:
+            print("Please enter a number between 1 and 8")
+    
+    # Process the choice
+    shopify_mode = False
+    skip_products = True
+    site_type_name = ""
+    
+    if choice == '1':
+        shopify_mode = True
+        site_type_name = "Shopify"
+        print("\n✅ Site type set to: SHOPIFY STORE")
+    elif choice == '2':
+        shopify_mode = True
+        site_type_name = "WooCommerce"
+        print("\n✅ Site type set to: WOOCOMMERCE STORE")
+    elif choice == '3':
+        shopify_mode = True
+        site_type_name = "BigCommerce"
+        print("\n✅ Site type set to: BIGCOMMERCE STORE")
+    elif choice == '4':
+        shopify_mode = True
+        site_type_name = "Magento"
+        print("\n✅ Site type set to: MAGENTO STORE")
+    elif choice == '5':
+        shopify_mode = True
+        site_type_name = "E-commerce"
+        print("\n✅ Site type set to: E-COMMERCE PLATFORM")
+    elif choice == '6':
+        site_type_name = "Standard"
+        print("\n✅ Site type set to: STANDARD WEBSITE")
+    elif choice == '7':
+        site_type_name = "WordPress"
+        print("\n✅ Site type set to: WORDPRESS (NON-COMMERCE)")
+    elif choice == '8':
+        site_type_name = "Custom"
+        print("\n✅ Site type set to: CUSTOM/STATIC SITE")
     
     # If e-commerce mode is enabled, ask about skipping products
     if shopify_mode:
